@@ -32,7 +32,7 @@ Follow these instructions to get a copy of the project up and running on your lo
     ```bash
     git clone [https://github.com/vin-2020/Requirements-Clarity-Checker.git](https://github.com/vin-2020/Requirements-Clarity-Checker.git)
     ```
-    2.  **Navigate to the project directory:**
+2.  **Navigate to the project directory:**
     ```bash
     cd Requirements-Clarity-Checker
     ```
@@ -53,7 +53,9 @@ Follow these instructions to get a copy of the project up and running on your lo
     streamlit run ui/app.py
     ```
 3.  Your web browser will automatically open a new tab with the ReqCheck application running.
-4.  Use the file uploader to analyze your first requirements document!
+   <img width="2517" height="782" alt="image" src="https://github.com/user-attachments/assets/ac920e68-5a07-44dc-a01d-706c2ec796e8" />
+
+4.  **Use the file uploader to test the app! For a quick start, you can use the `requirements_example.txt` file included in this repository.**
 
 ---
 
