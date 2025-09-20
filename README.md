@@ -2,7 +2,8 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous or subjective language, this tool helps prevent costly rework and project delays.
 
-![ReqCheck Screenshot]()
+<img width="2520" height="847" alt="image" src="https://github.com/user-attachments/assets/7d371da8-934a-47eb-b114-b3c9013f6343" />
+
 
 ---
 
@@ -62,7 +63,7 @@ Follow these instructions to get a copy of the project up and running on your lo
     streamlit run ui/app.py
     ```
 3.  Your web browser will automatically open a new tab with the ReqCheck application running.
-4.  Use the file uploader to test the app! For a quick start, you can use the `sophisticated_requirements.txt` file included in this repository.
+4.  Use the file uploader to test the app! For a quick start, you can use the `sample_requirements.txt` file included in this repository.
 
 ---
 
