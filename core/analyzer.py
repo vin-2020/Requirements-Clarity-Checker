@@ -1,15 +1,20 @@
 import spacy
+import re 
 
 # Load the small English NLP model from spaCy
 nlp = spacy.load("en_core_web_sm")
 
-# A list of common words and phrases that can lead to ambiguous requirements.
+# --- ENHANCED: More comprehensive list based on INCOSE guidance ---
 WEAK_WORDS = [
-    "should", "may", "could", "possibly", "as appropriate", "user-friendly",
-    "robust", "efficient", "effective", "etc.", "and/or", "minimize",
-    "maximize", "support", "seamless", "easy to use", "state-of-the-art",
-    "best", "handle", "approximately", "as required", "fast", "strong",
-    "high resolution", "high", "low", "long"
+    "about", "adequate", "and/or", "appropriate", "approximately", "as a minimum",
+    "as applicable", "as required", "be able to", "be capable of", "best",
+    "better", "could", "easy", "effective", "efficient", "etc.", "fast", "flexible",
+    "frequently", "good", "high", "handle", "if practical", "if possible",
+    "including but not limited to", "instead of", "large", "latest", "long",
+    "low", "maximize", "may", "minimize", "modern", "normal", "optimize",
+    "possibly", "provide for", "rapid", "recent", "robust", "seamless", "should",
+    "significant", "small", "state-of-the-art", "strong", "support", "timely",
+    "user-friendly"
 ]
 
 def check_requirement_ambiguity(requirement_text):
@@ -18,7 +23,8 @@ def check_requirement_ambiguity(requirement_text):
     lower_requirement = requirement_text.lower()
     
     for word in WEAK_WORDS:
-        if word in lower_requirement:
+        # Using regex with word boundaries (\b) for a more accurate match
+        if re.search(r'\b' + re.escape(word) + r'\b', lower_requirement):
             found_words.append(word)
             
     return found_words
@@ -36,13 +42,29 @@ def check_passive_voice(requirement_text):
             
     return found_phrases
 
-# --- NEW FUNCTION ---
 def check_incompleteness(requirement_text):
-    """
-    Checks if a requirement is a full sentence by looking for a verb.
-    Returns True if the requirement is likely incomplete (no verb found).
-    """
+    """Checks if a requirement is a full sentence by looking for a verb."""
     doc = nlp(requirement_text)
-    # Check for the presence of a root verb or an auxiliary verb.
     has_verb = any([token.pos_ in ["VERB", "AUX"] for token in doc])
     return not has_verb
+
+def check_singularity(requirement_text):
+    """
+    Checks if a requirement contains multiple actions, violating the 'singular' principle.
+    Returns a list of conjunctions or extra verbs found.
+    """
+    issues = []
+    doc = nlp(requirement_text)
+    
+    # Count root verbs (main actions)
+    root_verbs = [token for token in doc if token.dep_ == "ROOT" and token.pos_ == "VERB"]
+    
+    # Find conjunctions connecting clauses or verbs
+    conjunctions = [token.text.lower() for token in doc if token.dep_ in ["cc", "conj"] and token.text.lower() in ["and", "or"]]
+
+    if len(root_verbs) > 1 or conjunctions:
+        issues.extend(conjunctions)
+        if not conjunctions and len(root_verbs) > 1:
+            issues.extend([verb.text for verb in root_verbs[1:]])
+            
+    return list(set(issues)) # Return unique issues
