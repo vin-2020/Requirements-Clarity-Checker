@@ -4,3 +4,4 @@ wordcloud
 matplotlib
 spacy
 pandas
+google-generativeai
