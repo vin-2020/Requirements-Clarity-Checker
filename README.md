@@ -61,13 +61,19 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 ### 🏃‍♀️ Usage
 
-1.  Make sure you are in the main project directory in your terminal.
-2.  Run the following command to start the Streamlit application:
-    ```bash
-    streamlit run ui/app.py
-    ```
-3.  Your web browser will open. Paste your Google AI API Key into the input box at the top.
-4.  Use the file uploader to analyze a document, or use the "Need-to-Requirement Helper" to generate new requirements!
+1.  🚀 **Launch the App**
+    * In your terminal (from the project's main folder), run this command:
+        ```bash
+        streamlit run ui/app.py
+        ```
+    * A new tab will automatically open in your web browser.
+
+2.  🔑 **Enter Your API Key**
+    * Paste your secret Google AI API Key into the password box at the top of the page to enable the AI features.
+
+3.  📊 **Start Analyzing!**
+    * You can now use either the "Document Analyzer" tab to upload a file or the "Need-to-Requirement Helper" tab to generate new requirements.
+    * For a comprehensive demo, try uploading the `DRONE_SRS_v1.0.txt` file.
 
 ---
 
