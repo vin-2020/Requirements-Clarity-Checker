@@ -2,7 +2,8 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis and an integrated LLM to provide intelligent rewrite suggestions.
 
-![ReqCheck GIF Demo]()
+<img width="2524" height="854" alt="image" src="https://github.com/user-attachments/assets/6333cdd6-983c-42b1-8668-fd78c7a3dccc" />
+
 
 ---
 
