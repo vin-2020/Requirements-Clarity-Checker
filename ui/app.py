@@ -13,36 +13,59 @@ from core.analyzer import check_requirement_ambiguity, check_passive_voice, chec
 from core.scoring import calculate_clarity_score
 from llm.ai_suggestions import get_ai_suggestion, generate_requirement_from_need
 
+# --- FINAL, CORRECTED PARSER FUNCTION ---
 def extract_requirements_from_file(uploaded_file):
-    """Reads a file and uses regex to extract requirement lines."""
+    """
+    Reads a file and uses a robust regex to extract requirement lines with various ID formats.
+    """
     requirements = []
-    req_pattern = re.compile(r'^((?:[A-Z]+-\d+)|(?:\d+\.))\s+(.*)')
+    # This pattern is now more specific to prevent matching divider lines.
+    # It looks for IDs starting with letters and numbers, followed by a hyphen or period.
+    req_pattern = re.compile(r'^([A-Z0-9\.-]+)\s+(.*)')
+
     if uploaded_file.name.endswith('.txt'):
         lines = uploaded_file.getvalue().decode("utf-8").split('\n')
         for line in lines:
             line = line.strip()
+            # We add a condition to explicitly ignore lines that start with '---'
+            if line.startswith('---'):
+                continue
             if match := req_pattern.match(line):
                 requirements.append((match.group(1), match.group(2)))
+
     elif uploaded_file.name.endswith('.docx'):
         doc = docx.Document(uploaded_file)
         for para in doc.paragraphs:
             line = para.text.strip()
+            if line.startswith('---'):
+                continue
             if match := req_pattern.match(line):
                 requirements.append((match.group(1), match.group(2)))
+                
     return requirements
 
-# --- UPDATED: Highlight color with black text ---
 def format_requirement_with_highlights(req_id, req_text, issues):
     """Formats a requirement with HTML for highlighting issues."""
     highlighted_text = req_text
     if issues['ambiguous']:
         for word in issues['ambiguous']:
-            # Added "color: black;" to make text readable on a yellow background
             highlighted_text = re.sub(r'\b' + re.escape(word) + r'\b', f'<span style="background-color: #FFFF00; color: black; padding: 2px 4px; border-radius: 3px;">{word}</span>', highlighted_text, flags=re.IGNORECASE)
     if issues['passive']:
         for phrase in issues['passive']:
             highlighted_text = re.sub(re.escape(phrase), f'<span style="background-color: #FFA500; padding: 2px 4px; border-radius: 3px;">{phrase}</span>', highlighted_text, flags=re.IGNORECASE)
-    return f"⚠️ <strong>{req_id}</strong> {highlighted_text}"
+    
+    display_html = f"⚠️ <strong>{req_id}</strong> {highlighted_text}"
+    explanations = []
+    if issues['ambiguous']:
+        explanations.append(f"<i>- Ambiguity: Found weak words: <b>{', '.join(issues['ambiguous'])}</b></i>")
+    if issues['passive']:
+        explanations.append(f"<i>- Passive Voice: Found phrase: <b>'{', '.join(issues['passive'])}'</b>. Consider active voice.</i>")
+    if issues['incomplete']:
+        explanations.append("<i>- Incompleteness: Requirement appears to be a fragment.</i>")
+    
+    if explanations:
+        display_html += "<br>" + "<br>".join(explanations)
+    return f'<div style="background-color: #FFF3CD; color: #856404; padding: 10px; border-radius: 5px; margin-bottom: 10px;">{display_html}</div>'
 
 st.set_page_config(page_title="ReqCheck v2.0", page_icon="✨", layout="wide")
 with st.sidebar:
@@ -68,7 +91,9 @@ with tab1:
     if uploaded_file is not None:
         with st.spinner('Analyzing document... Please wait.'):
             requirements_list = extract_requirements_from_file(uploaded_file)
+        
         st.success(f"Analysis complete! Found {len(requirements_list)} requirements.")
+        
         if not requirements_list:
             st.error("No valid requirements found.")
         else:
@@ -82,7 +107,6 @@ with tab1:
             st.divider()
             st.header("Analysis Summary")
             
-            # --- RESTORED: Analysis Summary section with charts ---
             total_reqs = len(requirements_list)
             flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
             col1, col2 = st.columns(2)
@@ -112,7 +136,6 @@ with tab1:
                 ax.imshow(wordcloud, interpolation='bilinear')
                 ax.axis("off")
                 st.pyplot(fig)
-            # --- END OF RESTORED SECTION ---
 
             st.divider()
             st.header(f"Detailed Analysis")
@@ -152,7 +175,12 @@ with tab1:
                 export_data.append({"ID": result['id'], "Requirement Text": result['text'], "Status": "Clear" if not issues else "Flagged", "Issues Found": "; ".join(issues)})
             df = pd.DataFrame(export_data)
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="Download Report as CSV", data=csv, file_name=f"ReqCheck_Report_{uploaded_file.name}.csv", mime="text/csv")
+            st.download_button(
+                label="Download Report as CSV",
+                data=csv,
+                file_name=f"ReqCheck_Report_{uploaded_file.name}.csv",
+                mime="text/csv",
+            )
 
 with tab2:
     st.header("Translate a Stakeholder Need into a Formal Requirement")
