@@ -13,16 +13,10 @@ from core.analyzer import check_requirement_ambiguity, check_passive_voice, chec
 from core.scoring import calculate_clarity_score
 from llm.ai_suggestions import get_ai_suggestion, generate_requirement_from_need
 
-# --- CORRECTED: More specific Regex pattern ---
 def extract_requirements_from_file(uploaded_file):
-    """
-    Reads a file and uses a more specific regex to extract requirement lines.
-    """
+    """Reads a file and uses regex to extract requirement lines."""
     requirements = []
-    # This pattern is now more specific to prevent matching divider lines.
-    # It looks for IDs like SYS-001, FLT-001, or 1., 2., etc.
     req_pattern = re.compile(r'^((?:[A-Z]+-\d+)|(?:\d+\.))\s+(.*)')
-
     if uploaded_file.name.endswith('.txt'):
         lines = uploaded_file.getvalue().decode("utf-8").split('\n')
         for line in lines:
@@ -37,12 +31,14 @@ def extract_requirements_from_file(uploaded_file):
                 requirements.append((match.group(1), match.group(2)))
     return requirements
 
+# --- UPDATED: Highlight color with black text ---
 def format_requirement_with_highlights(req_id, req_text, issues):
     """Formats a requirement with HTML for highlighting issues."""
     highlighted_text = req_text
     if issues['ambiguous']:
         for word in issues['ambiguous']:
-            highlighted_text = re.sub(r'\b' + re.escape(word) + r'\b', f'<span style="background-color: #FFFF00; padding: 2px 4px; border-radius: 3px;">{word}</span>', highlighted_text, flags=re.IGNORECASE)
+            # Added "color: black;" to make text readable on a yellow background
+            highlighted_text = re.sub(r'\b' + re.escape(word) + r'\b', f'<span style="background-color: #FFFF00; color: black; padding: 2px 4px; border-radius: 3px;">{word}</span>', highlighted_text, flags=re.IGNORECASE)
     if issues['passive']:
         for phrase in issues['passive']:
             highlighted_text = re.sub(re.escape(phrase), f'<span style="background-color: #FFA500; padding: 2px 4px; border-radius: 3px;">{phrase}</span>', highlighted_text, flags=re.IGNORECASE)
@@ -86,13 +82,37 @@ with tab1:
             st.divider()
             st.header("Analysis Summary")
             
+            # --- RESTORED: Analysis Summary section with charts ---
             total_reqs = len(requirements_list)
             flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
-            if total_reqs > 0:
-                clarity_score = calculate_clarity_score(total_reqs, flagged_reqs)
-                st.metric(label="Overall Clarity Score", value=f"{clarity_score} / 100")
-                st.progress(clarity_score)
-                if clarity_score >= 90: st.balloons()
+            col1, col2 = st.columns(2)
+            with col1:
+                if total_reqs > 0:
+                    clarity_score = calculate_clarity_score(total_reqs, flagged_reqs)
+                    st.metric(label="Overall Clarity Score", value=f"{clarity_score} / 100")
+                    st.progress(clarity_score)
+                    if clarity_score >= 90: st.balloons()
+            with col2:
+                issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0}
+                for res in results:
+                    if res['ambiguous']: issue_counts["Ambiguity"] += 1
+                    if res['passive']: issue_counts["Passive Voice"] += 1
+                    if res['incomplete']: issue_counts["Incompleteness"] += 1
+                st.subheader("Issues by Type")
+                st.bar_chart(issue_counts)
+            
+            all_ambiguous_words = []
+            for res in results:
+                if res['ambiguous']: all_ambiguous_words.extend(res['ambiguous'])
+            st.subheader("Common Weak Words Found")
+            if all_ambiguous_words:
+                text_for_cloud = ' '.join(all_ambiguous_words)
+                wordcloud = WordCloud(width=800, height=300, background_color='white', collocations=False).generate(text_for_cloud)
+                fig, ax = plt.subplots()
+                ax.imshow(wordcloud, interpolation='bilinear')
+                ax.axis("off")
+                st.pyplot(fig)
+            # --- END OF RESTORED SECTION ---
 
             st.divider()
             st.header(f"Detailed Analysis")
@@ -121,7 +141,6 @@ with tab1:
                     success_html = f'<div style="background-color: #D4EDDA; color: #155724; padding: 10px; border-radius: 5px; margin-bottom: 10px;">✅ <strong>{result["id"]}</strong> {result["text"]}</div>'
                     st.markdown(success_html, unsafe_allow_html=True)
             
-            # --- ADDED BACK: Export to CSV Feature ---
             st.divider()
             st.header("Export Report")
             export_data = []
@@ -133,12 +152,7 @@ with tab1:
                 export_data.append({"ID": result['id'], "Requirement Text": result['text'], "Status": "Clear" if not issues else "Flagged", "Issues Found": "; ".join(issues)})
             df = pd.DataFrame(export_data)
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Download Report as CSV",
-                data=csv,
-                file_name=f"ReqCheck_Report_{uploaded_file.name}.csv",
-                mime="text/csv",
-            )
+            st.download_button(label="Download Report as CSV", data=csv, file_name=f"ReqCheck_Report_{uploaded_file.name}.csv", mime="text/csv")
 
 with tab2:
     st.header("Translate a Stakeholder Need into a Formal Requirement")
