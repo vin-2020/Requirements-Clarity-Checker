@@ -1,31 +1,43 @@
 # core/scoring.py
+"""
+Scoring utilities for ReqCheck.
 
-# Define the penalty weights for each type of issue.
-# We can make these customizable later (from Module 6).
-PENALTY_WEIGHTS = {
-    "ambiguity": 15,
-    "passive_voice": 10,
-    "incompleteness": 25
-}
+This module provides functions to compute quality metrics
+for analyzed requirements documents.
+"""
 
-def calculate_clarity_score(total_reqs, issue_counts):
+
+def calculate_clarity_score(total_reqs, flagged_reqs):
     """
-    Calculates an overall clarity score for a document.
-    
-    The score starts at 100 and deducts points based on the number and type of issues found.
+    Calculate a clarity score based on the percentage of requirements
+    that contain no detected issues.
+
+    Parameters
+    ----------
+    total_reqs : int
+        The total number of requirements analyzed.
+    flagged_reqs : int
+        The number of requirements flagged with issues
+        (e.g., ambiguity, passive voice, incompleteness).
+
+    Returns
+    -------
+    int
+        Clarity score on a scale of 0–100, rounded down to an integer.
+        A higher score indicates a clearer requirements set.
+
+    Notes
+    -----
+    - If no requirements are provided (`total_reqs == 0`),
+      the function defaults to returning 100.
     """
     if total_reqs == 0:
         return 100
 
-    total_penalty = 0
-    total_penalty += issue_counts.get("Ambiguity", 0) * PENALTY_WEIGHTS["ambiguity"]
-    total_penalty += issue_counts.get("Passive Voice", 0) * PENALTY_WEIGHTS["passive_voice"]
-    total_penalty += issue_counts.get("Incompleteness", 0) * PENALTY_WEIGHTS["incompleteness"]
-    
-    # Calculate the average penalty per requirement
-    average_penalty = total_penalty / total_reqs
-    
-    # The final score is 100 minus the average penalty, with a floor of 0.
-    score = max(0, 100 - average_penalty)
-    
+    clear_reqs = total_reqs - flagged_reqs
+
+    # Percentage of requirements without issues
+    score = (clear_reqs / total_reqs) * 100
+
     return int(score)
+
