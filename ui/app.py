@@ -7,10 +7,10 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# Make local packages importable when run from /ui
+# Allow local imports when running from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- External project modules ---
+# --- App Modules ---
 from core.analyzer import (
     check_requirement_ambiguity,
     check_passive_voice,
@@ -38,9 +38,7 @@ except Exception:
         )
         return get_ai_suggestion(api_key, prompt)
 
-# ===================================================================
-# Helpers used by the analyzer UI
-# ===================================================================
+# ========================= Helpers for Analyzer =========================
 
 def extract_requirements_from_string(content: str):
     """Extract (id, text) pairs like 'SYS-001 ...' or '1.' lines."""
@@ -99,9 +97,7 @@ def format_requirement_with_highlights(req_id, req_text, issues):
         f'border-radius:5px;margin-bottom:10px;">{display_html}</div>'
     )
 
-# ===================================================================
-# Global styles & session state
-# ===================================================================
+# =============================== UI Setup ===============================
 
 st.set_page_config(page_title="ReqCheck Workspace", page_icon="🗂️", layout="wide")
 
@@ -145,65 +141,60 @@ if api_key_input:
 if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
 
-# ===================================================================
-# Tabs: Analyzer | Need->Requirement | Chatbot | Projects (extra)
-# ===================================================================
+# ======================= Layout: main + right panel =======================
+# Simulate a "right sidebar" using columns. Left = main content (tabs),
+# Right = projects manager panel.
+main_col, right_col = st.columns([4, 1], gap="large")
 
-tab_analyze, tab_need, tab_chat, tab_projects = st.tabs([
-    "📄 Document Analyzer",
-    "💡 Need-to-Requirement Helper",
-    "💬 Requirements Chatbot",
-    "🗂️ Projects",  # extra/optional tab
-])
+# ----------------------------- Right Panel -----------------------------
+with right_col:
+    st.subheader("🗂️ Projects")
 
-# ------------------------------
-# Projects (select/create) TAB
-# ------------------------------
-with tab_projects:
-    st.header("Project Workspace")
+    # Current selection info + clear
+    if st.session_state.selected_project is not None:
+        _pid, _pname = st.session_state.selected_project
+        st.caption(f"Current: **{_pname}**")
+        if st.button("Clear selection", key="btn_clear_proj_right"):
+            st.session_state.selected_project = None
+            st.rerun()
+
+    # Load existing
     projects = get_all_projects()
-    if projects:
-        names = [p[1] for p in projects]
-        selected_name = st.selectbox("Select an existing project:", names, key="proj_select")
-        if st.button("Load Project", key="btn_load_proj"):
+    names = [p[1] for p in projects] if projects else []
+    if names:
+        sel_name = st.selectbox("Open project:", names, key="proj_select_right")
+        if st.button("Load", key="btn_load_proj_right"):
             for p in projects:
-                if p[1] == selected_name:
+                if p[1] == sel_name:
                     st.session_state.selected_project = p
-                    st.success(f"Loaded: {selected_name}")
+                    st.success(f"Loaded: {sel_name}")
                     st.rerun()
     else:
-        st.info("No projects found. Create a new one to get started.")
+        st.caption("No projects yet.")
 
-    st.divider()
-    st.subheader("Create a New Project")
-    new_project_name = st.text_input("New Project Name:", key="new_proj_name")
-    if st.button("Create", key="btn_create_proj"):
-        if new_project_name:
-            feedback = add_project(new_project_name)
+    # Create new
+    st.text_input("New project name:", key="new_proj_name_right")
+    if st.button("Create", key="btn_create_proj_right"):
+        new_name = st.session_state.get("new_proj_name_right", "").strip()
+        if new_name:
+            feedback = add_project(new_name)
             st.success(feedback)
             st.rerun()
         else:
             st.error("Please enter a project name.")
 
-    # Show currently selected project (if any)
-    if st.session_state.selected_project is not None:
-        _, name = st.session_state.selected_project
-        st.caption(f"Current project: **{name}**")
-        if st.button("← Clear Selection", key="btn_clear_proj"):
-            st.session_state.selected_project = None
-            st.rerun()
+# ------------------------------ Main Tabs ------------------------------
+with main_col:
+    tab_analyze, tab_need, tab_chat = st.tabs([
+        "📄 Document Analyzer",
+        "💡 Need-to-Requirement Helper",
+        "💬 Requirements Chatbot",
+    ])
 
-# Utility: badge suffix for headers
-def project_suffix():
-    if st.session_state.selected_project is None:
-        return " — (no project selected)"
-    return f" — Project: {st.session_state.selected_project[1]}"
-
-# ------------------------------
-# Tab 1: Document Analyzer
-# ------------------------------
+# ------------------------------ Tab: Analyzer ------------------------------
 with tab_analyze:
-    st.header("Analyze a Requirements Document" + project_suffix())
+    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
+    st.header("Analyze a Requirements Document" + (f" — Project: {pname}" if pname else ""))
 
     uploaded_file = st.file_uploader("Upload your own requirements document", type=['txt', 'docx'])
 
@@ -349,11 +340,10 @@ with tab_analyze:
             mime="text/csv"
         )
 
-# ------------------------------
-# Tab 2: Need-to-Requirement Helper
-# ------------------------------
+# ------------------------------ Tab: Need Helper ------------------------------
 with tab_need:
-    st.header("Translate a Stakeholder Need" + project_suffix())
+    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
+    st.header("Translate a Stakeholder Need" + (f" — Project: {pname}" if pname else ""))
 
     need_input = st.text_area(
         "Enter a stakeholder need:",
@@ -371,40 +361,30 @@ with tab_need:
                 st.info("AI Generated Suggestion:")
                 st.markdown(generated_req)
 
-# ------------------------------
-# Tab 3: Requirements Chatbot
-# ------------------------------
+# ------------------------------ Tab: Chatbot ------------------------------
 with tab_chat:
-    st.header("Chat with an AI Systems Engineering Assistant")
+    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
+    st.header("Chat with an AI Systems Engineering Assistant" + (f" — Project: {pname}" if pname else ""))
 
-    # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Render previous messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Get new user input and respond
     if prompt := st.chat_input("Ask a question about your requirements..."):
         if not st.session_state.api_key:
             st.warning("Please enter your Google AI API Key at the top of the page to use the chatbot.")
         else:
-            # Add user message
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # Query AI
             with st.spinner("AI is thinking..."):
-                api_history = [
-                    {"role": m["role"], "parts": [m["content"]]}
-                    for m in st.session_state.messages
-                ]
+                api_history = [{"role": m["role"], "parts": [m["content"]]} for m in st.session_state.messages]
                 response = get_chatbot_response(st.session_state.api_key, api_history)
 
-            # Add assistant reply
             st.session_state.messages.append({"role": "assistant", "content": response})
             with st.chat_message("assistant"):
                 st.markdown(response)
