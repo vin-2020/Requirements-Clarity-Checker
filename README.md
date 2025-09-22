@@ -1,26 +1,25 @@
 # ReqCheck - An AI-Powered Requirements Assistant ✨
 
-An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis and an integrated LLM to provide intelligent rewrite suggestions and conversational assistance.
+An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-<img width="1897" height="702" alt="image" src="https://github.com/user-attachments/assets/ed962708-e080-4c46-bafa-3cd1137a11d8" />
-
+<img width="2502" height="966" alt="image" src="https://github.com/user-attachments/assets/3aa1c6e1-db24-4d5d-a975-d179219196e7" />
 
 ---
 
 ### 🚀 Key Features
 
-#### Analysis Features
-* **📄 Document Parsing:** Upload and analyze requirements from `.txt` and `.docx` files.
-* **📈 Quality Scoring:** Get an overall "Clarity Score" based on the number of issues found.
+* **🗂️ Project Workspace:** Create projects to store and manage multiple requirement documents in one place, with a persistent database backend.
+* **📄 Document Analysis:** Upload and analyze requirements from `.txt` and `.docx` files within a project.
+* **📈 Quality Scoring:** Get an overall "Clarity Score" for your document.
 * **⚠️ Issue Detection:** Automatically flags common issues like ambiguity, passive voice, and incompleteness.
 * **📊 Visual Reporting:** A summary bar chart and word cloud visualize the most common issues.
 * **📝 Detailed Feedback:** Provides a line-by-line, color-coded analysis with educational tooltips.
 * **💾 Exportable Reports:** Download the full analysis as a `.csv` file for easy sharing and tracking.
 
 #### AI-Powered Assistant Features
-* **💡 AI Rewrite Suggestions:** Uses the Google Gemini LLM to suggest clearer, stronger versions of flagged requirements.
-* **✍️ Need-to-Requirement Helper:** Assists engineers in converting vague stakeholder needs into well-structured, formal "shall" statements.
-* **💬 Requirements Chatbot:** An interactive, conversational AI assistant to discuss, refine, and get feedback on requirements in real-time.
+* **💡 AI Rewrite Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements.
+* **✍️ Need-to-Requirement Helper:** Assists engineers in converting vague stakeholder needs into formal "shall" statements.
+* **💬 Requirements Chatbot:** An interactive AI assistant to discuss and refine requirements in real-time.
 
 ---
 
@@ -66,23 +65,24 @@ Follow these instructions to get a copy of the project up and running on your lo
         ```
     * A new tab will automatically open in your web browser.
 
-2.  🔑 **Enter Your API Key**
-    * Paste your secret Google AI API Key into the password box at the top of the page to enable the AI features.
+2.  🗂️ **Create or Select a Project**
+    * The app will start in the "Project Workspace." You can create a new project or load an existing one.
 
-3.  📊 **Start Analyzing!**
-    * You can now use any of the three tabs: "Document Analyzer," "Need-to-Requirement Helper," or the new "Requirements Chatbot."
-    * For a comprehensive demo, try uploading the `DRONE_SRS_v1.0.txt` file.
+3.  🔑 **Enter Your API Key**
+    * Once a project is loaded, paste your secret Google AI API Key into the password box to enable the AI features.
+
+4.  📊 **Start Analyzing!**
+    * You can now use any of the three tabs: "Document Analyzer," "Need-to-Requirement Helper," or the "Requirements Chatbot" for your selected project.
 
 ---
 
 ### 🗺️ Project Roadmap
 
 * [x] **Phase 1 (MVP):** Core ambiguity analysis engine (Command-line).
-* [x] **Phase 2 (v1.0):** Functional UI with advanced NLP checks and reporting.
-* [x] **Phase 3 (v2.0):** Integration of LLM for intelligent assistance, including a conversational chatbot.
-* [ ] **Phase 4 (v3.0):** Evolve into a "Project Workspace" with a database to track quality over time.
+* [x] **Phase 2 (v2.0):** Functional UI with advanced NLP checks and AI assistance features.
+* [ ] **Phase 3 (v3.0):** Evolve into a "Project Workspace" with a database to manage projects and track quality over time.
 
 ---
 
 ### 🙏 Acknowledgments
-* This project's structure and goals are aligned with the principles found in the **INCOSE Systems Engineering Handbook**.
+* This project's structure and goals are aligned with principles from the **INCOSE Systems Engineering Handbook**.
