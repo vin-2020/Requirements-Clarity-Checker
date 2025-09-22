@@ -140,6 +140,7 @@ if api_key_input:
 # Track selected project globally
 if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
+    st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
 
 # ======================= Layout: main + right panel =======================
 # Simulate a "right sidebar" using columns. Left = main content (tabs),
