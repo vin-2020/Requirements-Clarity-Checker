@@ -1,0 +1,6 @@
+[theme]
+primaryColor="#3366CC"  # A vibrant, professional blue
+backgroundColor="#E6F2FF" # A very light, cheerful blue for the background
+secondaryBackgroundColor="#CCE0FF" # A slightly darker light blue for secondary elements
+textColor="#1A1A1A"      # A dark gray for good readability
+font="sans serif"
