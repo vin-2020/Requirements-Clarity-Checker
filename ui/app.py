@@ -69,7 +69,7 @@ def format_requirement_with_highlights(req_id, req_text, issues):
 
 st.set_page_config(page_title="ReqCheck v2.0", page_icon="✨", layout="wide")
 with st.sidebar:
-    st.image("https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_LOGO.png?raw=true", use_container_width=True)
+    st.image("https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true", use_container_width=True)
     st.header("About ReqCheck")
     st.info("An AI-assisted tool to evaluate the quality of system requirements...")
     st.header("Project Links")
