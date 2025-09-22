@@ -1,6 +1,15 @@
 [theme]
-primaryColor="#3366CC"  # A vibrant, professional blue
-backgroundColor="#E6F2FF" # A very light, cheerful blue for the background
-secondaryBackgroundColor="#CCE0FF" # A slightly darker light blue for secondary elements
-textColor="#1A1A1A"      # A dark gray for good readability
+# This is the main color for buttons, sliders, etc.
+primaryColor="#6C63FF"  # A vibrant, friendly purple
+
+# The main background color of the app
+backgroundColor="#F0F2F6" # A very light, clean grey
+
+# The background color of the sidebar and other secondary elements
+secondaryBackgroundColor="#FFFFFF" # A crisp white for contrast
+
+# The main text color
+textColor="#262730" # A dark, readable charcoal
+
+# The font style
 font="sans serif"
