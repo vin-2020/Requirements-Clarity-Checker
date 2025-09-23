@@ -138,3 +138,4 @@ def get_chatbot_response(api_key, chat_history):
     except Exception as e:
         # Return string (not raising) to match existing behavior
         return f"An error occurred with the AI service: {e}"
+
