@@ -54,7 +54,6 @@ def add_project(project_name):
                        (project_name, datetime.now().isoformat()))
         conn.commit()
     except sqlite3.IntegrityError:
-        # This error occurs if the project name already exists
         return "Project name already exists."
     finally:
         conn.close()
@@ -69,4 +68,22 @@ def get_all_projects():
     conn.close()
     return projects
 
-# We will add more functions here later to save documents and analysis results.
+def delete_project(project_id: int) -> str:
+    conn = sqlite3.connect(DATABASE_NAME)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        cur = conn.cursor()
+
+        # Remove children first (manual cascade)
+        cur.execute(
+            "DELETE FROM requirements WHERE document_id IN "
+            "(SELECT id FROM documents WHERE project_id = ?)",
+            (project_id,)
+        )
+        cur.execute("DELETE FROM documents WHERE project_id = ?", (project_id,))
+        cur.execute("DELETE FROM projects  WHERE id = ?", (project_id,))
+
+        conn.commit()
+        return "Project deleted successfully."
+    finally:
+        conn.close()
