@@ -1,0 +1,33 @@
+{
+  "name": "INCOSE Default Rules",
+  "description": "A general-purpose rule set based on INCOSE best practices.",
+  "rules": {
+    "ambiguity": {
+      "enabled": true,
+      "penalty": 15,
+      "words": [
+        "about", "adequate", "and/or", "appropriate", "approximately", "as a minimum",
+        "as applicable", "as required", "be able to", "be capable of", "best",
+        "better", "could", "easy", "effective", "efficient", "etc.", "fast", "flexible",
+        "frequently", "good", "high", "handle", "if practical", "if possible",
+        "including but not limited to", "instead of", "large", "latest", "long",
+        "low", "maximize", "may", "minimize", "modern", "normal", "optimize",
+        "possibly", "provide for", "rapid", "recent", "robust", "seamless", "should",
+        "significant", "small", "state-of-the-art", "strong", "support", "timely",
+        "user-friendly"
+      ]
+    },
+    "passive_voice": {
+      "enabled": true,
+      "penalty": 10
+    },
+    "incompleteness": {
+      "enabled": true,
+      "penalty": 25
+    },
+    "singularity": {
+      "enabled": true,
+      "penalty": 20
+    }
+  }
+}
