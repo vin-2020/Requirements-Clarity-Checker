@@ -1,3 +1,4 @@
+# ui/app.py 
 import streamlit as st
 import sys
 import os
@@ -6,25 +7,45 @@ import docx
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import pandas as pd
+import inspect
 
-# Allow local imports when running from /ui
+# Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- App Modules ---
+# ------------------------- Imports from your app -------------------------
+# Analyzer functions (some may not exist in older versions; we shim below)
 from core.analyzer import (
     check_requirement_ambiguity,
     check_passive_voice,
     check_incompleteness,
 )
-from core.scoring import calculate_clarity_score
-from llm.ai_suggestions import get_ai_suggestion, generate_requirement_from_need
-from db.database import init_db, add_project, get_all_projects
+try:
+    from core.analyzer import check_singularity  # optional
+except Exception:
+    def check_singularity(_text: str):
+        return []  # safe fallback
 
-# Try to import chatbot; if missing, shim via get_ai_suggestion
+# Scoring (signature may be old or new; we handle both)
+from core.scoring import calculate_clarity_score
+
+# Optional rule engine (new); fall back to a dummy if missing
+try:
+    from core.rule_engine import RuleEngine
+except Exception:
+    class RuleEngine:
+        """Minimal stub to keep the app running if core.rule_engine is absent."""
+        def __init__(self):
+            pass
+
+# LLM helpers
+from llm.ai_suggestions import get_ai_suggestion, generate_requirement_from_need
 try:
     from llm.ai_suggestions import get_chatbot_response
 except Exception:
     def get_chatbot_response(api_key: str, history: list[dict]) -> str:
+        """
+        Fallback: flattens chat history into a single prompt and uses get_ai_suggestion().
+        """
         convo = []
         for msg in history:
             role = msg.get("role", "user")
@@ -38,6 +59,12 @@ except Exception:
         )
         return get_ai_suggestion(api_key, prompt)
 
+# Database helpers  (DB memory integration)
+# Database helpers  (DB memory integration)
+from db.database import init_db, add_project, get_all_projects# type: ignore
+from db import database as db  # type: ignore # <-- module import avoids name errors
+import importlib
+db = importlib.reload(db)  
 # ========================= Helpers for Analyzer =========================
 
 def extract_requirements_from_string(content: str):
@@ -56,6 +83,7 @@ def extract_requirements_from_file(uploaded_file):
         content = uploaded_file.getvalue().decode("utf-8")
     elif uploaded_file.name.endswith('.docx'):
         d = docx.Document(uploaded_file)
+        # FIX: proper list comprehension (no stray quotes)
         content = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
     else:
         content = ""
@@ -64,7 +92,7 @@ def extract_requirements_from_file(uploaded_file):
 def format_requirement_with_highlights(req_id, req_text, issues):
     """Inline HTML highlight for ambiguous/passive elements."""
     highlighted_text = req_text
-    if issues['ambiguous']:
+    if issues.get('ambiguous'):
         for word in issues['ambiguous']:
             highlighted_text = re.sub(
                 r'\b' + re.escape(word) + r'\b',
@@ -72,7 +100,7 @@ def format_requirement_with_highlights(req_id, req_text, issues):
                 highlighted_text,
                 flags=re.IGNORECASE
             )
-    if issues['passive']:
+    if issues.get('passive'):
         for phrase in issues['passive']:
             highlighted_text = re.sub(
                 re.escape(phrase),
@@ -83,12 +111,14 @@ def format_requirement_with_highlights(req_id, req_text, issues):
 
     display_html = f"⚠️ <strong>{req_id}</strong> {highlighted_text}"
     explanations = []
-    if issues['ambiguous']:
+    if issues.get('ambiguous'):
         explanations.append(f"<i>- Ambiguity: Found weak words: <b>{', '.join(issues['ambiguous'])}</b></i>")
-    if issues['passive']:
+    if issues.get('passive'):
         explanations.append(f"<i>- Passive Voice: Found phrase: <b>'{', '.join(issues['passive'])}'</b>. Consider active voice.</i>")
-    if issues['incomplete']:
+    if issues.get('incomplete'):
         explanations.append("<i>- Incompleteness: Requirement appears to be a fragment.</i>")
+    if issues.get('singularity'):
+        explanations.append(f"<i>- Singularity: Multiple actions indicated: <b>{', '.join(issues['singularity'])}</b></i>")
     if explanations:
         display_html += "<br>" + "<br>".join(explanations)
 
@@ -97,10 +127,41 @@ def format_requirement_with_highlights(req_id, req_text, issues):
         f'border-radius:5px;margin-bottom:10px;">{display_html}</div>'
     )
 
+def safe_call_ambiguity(text: str, engine: RuleEngine | None):
+    """Call check_requirement_ambiguity with or without rule engine, depending on its signature."""
+    try:
+        # Try (text, engine)
+        return check_requirement_ambiguity(text, engine)
+    except TypeError:
+        # Fallback to (text)
+        return check_requirement_ambiguity(text)
+
+def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, engine: RuleEngine | None = None):
+    """
+    Call calculate_clarity_score supporting both signatures:
+    - New: calculate_clarity_score(total_reqs, issue_counts, rule_engine)
+    - Old: calculate_clarity_score(total_reqs, flagged_reqs)
+    """
+    try:
+        sig = inspect.signature(calculate_clarity_score)
+        if len(sig.parameters) >= 3:
+            # New signature expects issue_counts + engine
+            return calculate_clarity_score(total_reqs, issue_counts or {}, engine)
+        else:
+            # Old signature: compute flagged_reqs
+            flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
+            return calculate_clarity_score(total_reqs, flagged_reqs)
+    except Exception:
+        # Ultimate fallback: basic percent clear
+        flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
+        clear_reqs = max(0, total_reqs - flagged_reqs)
+        return int((clear_reqs / total_reqs) * 100) if total_reqs else 100
+
 # =============================== UI Setup ===============================
 
 st.set_page_config(page_title="ReqCheck Workspace", page_icon="🗂️", layout="wide")
 
+# Global CSS
 st.markdown("""
 <style>
     .req-container { padding:10px;border-radius:5px;margin-bottom:10px;border:1px solid #ddd; }
@@ -122,7 +183,7 @@ with st.sidebar:
 
 st.title("✨ ReqCheck: AI-Powered Requirements Assistant")
 
-# Init DB once
+# ✅ Initialize the database on first run (DB memory)
 init_db()
 
 # Single API key stored globally
@@ -140,14 +201,14 @@ if api_key_input:
 # Track selected project globally
 if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
-    st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
+st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
+# One RuleEngine instance (real or stub)
+rule_engine = RuleEngine()
 
 # ======================= Layout: main + right panel =======================
-# Simulate a "right sidebar" using columns. Left = main content (tabs),
-# Right = projects manager panel.
 main_col, right_col = st.columns([4, 1], gap="large")
 
-# ----------------------------- Right Panel -----------------------------
+# ----------------------------- Right Panel (Projects) -----------------------------
 with right_col:
     st.subheader("🗂️ Projects")
 
@@ -159,17 +220,68 @@ with right_col:
             st.session_state.selected_project = None
             st.rerun()
 
-    # Load existing
+    # Load existing projects
     projects = get_all_projects()
     names = [p[1] for p in projects] if projects else []
     if names:
         sel_name = st.selectbox("Open project:", names, key="proj_select_right")
-        if st.button("Load", key="btn_load_proj_right"):
-            for p in projects:
-                if p[1] == sel_name:
-                    st.session_state.selected_project = p
-                    st.success(f"Loaded: {sel_name}")
+
+        # --- Confirmation state (add these 3 keys once) ---
+        if "confirm_delete" not in st.session_state:
+            st.session_state.confirm_delete = False
+        if "delete_project_id" not in st.session_state:
+            st.session_state.delete_project_id = None
+        if "delete_project_name" not in st.session_state:
+            st.session_state.delete_project_name = None
+
+        # Load / Delete buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Load", key="btn_load_proj_right"):
+                for p in projects:
+                    if p[1] == sel_name:
+                        st.session_state.selected_project = p
+                        st.success(f"Loaded: {sel_name}")
+                        st.rerun()
+
+        with col2:
+            if st.button("Delete", key="btn_delete_proj_right"):
+                # Store selection and show confirmation UI on next rerun
+                for p in projects:
+                    if p[1] == sel_name:
+                        st.session_state.delete_project_id = p[0]
+                        st.session_state.delete_project_name = sel_name
+                        st.session_state.confirm_delete = True
+
+        # ---------- PASTE THIS CONFIRMATION BLOCK HERE ----------
+        # Render confirmation UI (persists across reruns)
+        if st.session_state.confirm_delete:
+            st.warning(
+                f"You're about to delete '{st.session_state.delete_project_name}'. "
+                "This cannot be undone."
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Confirm Delete", key="btn_confirm_delete_proj_right"):
+                    # sanity check and delete
+                    if hasattr(db, "delete_project"):
+                        db.delete_project(st.session_state.delete_project_id)
+                        st.success("Project deleted.")
+                    else:
+                        st.error("delete_project() is not available in db.database. Did you save and reload?")
+                    # clear state regardless
+                    st.session_state.confirm_delete = False
+                    st.session_state.delete_project_id = None
+                    st.session_state.delete_project_name = None
                     st.rerun()
+
+            with c2:
+                if st.button("Cancel", key="btn_cancel_delete_proj_right"):
+                    st.session_state.confirm_delete = False
+                    st.session_state.delete_project_id = None
+                    st.session_state.delete_project_name = None
+        # -------------------------------------------------------
+
     else:
         st.caption("No projects yet.")
 
@@ -183,6 +295,7 @@ with right_col:
             st.rerun()
         else:
             st.error("Please enter a project name.")
+
 
 # ------------------------------ Main Tabs ------------------------------
 with main_col:
@@ -227,50 +340,64 @@ with tab_analyze:
         st.success(f"Analysis complete! Found {len(requirements_list)} requirements.")
 
     if requirements_list:
+        # Analyze each requirement (support both analyzer signatures)
         results = []
-        for req_id, req_text in requirements_list:
-            ambiguous_words = check_requirement_ambiguity(req_text)
+        for (req_id, req_text) in requirements_list:
+            ambiguous_words = safe_call_ambiguity(req_text, rule_engine)
             passive_phrases = check_passive_voice(req_text)
             is_incomplete = check_incompleteness(req_text)
+            singularity_issues = check_singularity(req_text)
             results.append({
                 'id': req_id,
                 'text': req_text,
                 'ambiguous': ambiguous_words,
                 'passive': passive_phrases,
-                'incomplete': is_incomplete
+                'incomplete': is_incomplete,
+                'singularity': singularity_issues
             })
 
+        # In ui/app.py, replace the "Analysis Summary" section
         st.divider()
         st.header("Analysis Summary")
 
         total_reqs = len(requirements_list)
-        flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
-        clarity_score = calculate_clarity_score(total_reqs, flagged_reqs) if total_reqs > 0 else 100
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Requirements", f"{total_reqs}")
-        c2.metric("Flagged for Issues", f"{flagged_reqs}")
-        c3.metric("Clarity Score", f"{clarity_score} / 100")
+        # Count a requirement as flagged if it has ANY issue type
+        flagged_reqs = sum(
+            1 for r in results
+            if r.get('ambiguous') or r.get('passive') or r.get('incomplete') or r.get('singularity')
+        )
+
+        # Simple clarity metric = % clear
+        clarity_score = int(((total_reqs - flagged_reqs) / total_reqs) * 100) if total_reqs else 100
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Requirements", total_reqs)
+        col2.metric("Flagged for Issues", flagged_reqs)
+        col3.metric("Clarity Score", f"{clarity_score} / 100")
+
+        # If Streamlit warns about st.progress expecting 0..1, use clarity_score/100
         st.progress(clarity_score)
+
         if clarity_score >= 90:
             st.balloons()
 
-        issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0}
-        for res in results:
-            if res['ambiguous']:
-                issue_counts["Ambiguity"] += 1
-            if res['passive']:
-                issue_counts["Passive Voice"] += 1
-            if res['incomplete']:
-                issue_counts["Incompleteness"] += 1
+        # Build per-issue counts for the chart
+        issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
+        for r in results:
+            if r.get('ambiguous'):     issue_counts["Ambiguity"] += 1
+            if r.get('passive'):       issue_counts["Passive Voice"] += 1
+            if r.get('incomplete'):    issue_counts["Incompleteness"] += 1
+            if r.get('singularity'):   issue_counts["Singularity"] += 1
 
         st.subheader("Issues by Type")
         st.bar_chart(issue_counts)
 
+        # ----- Word cloud -----
         all_ambiguous_words = []
-        for res in results:
-            if res['ambiguous']:
-                all_ambiguous_words.extend(res['ambiguous'])
+        for r in results:
+            if r.get('ambiguous'):
+                all_ambiguous_words.extend(r['ambiguous'])
 
         with st.expander("View Common Weak Words Cloud"):
             if all_ambiguous_words:
@@ -287,7 +414,7 @@ with tab_analyze:
         st.header("Detailed Analysis")
 
         for result in results:
-            is_flagged = result['ambiguous'] or result['passive'] or result['incomplete']
+            is_flagged = result['ambiguous'] or result['passive'] or result['incomplete'] or result['singularity']
             if is_flagged:
                 with st.container(border=True):
                     formatted_html = format_requirement_with_highlights(result['id'], result['text'], result)
@@ -298,11 +425,13 @@ with tab_analyze:
                         st.caption(f"ⓘ **Passive Voice:** Found phrase: **'{', '.join(result['passive'])}'**. Consider active voice.")
                     if result['incomplete']:
                         st.caption("ⓘ **Incompleteness:** Requirement appears to be a fragment.")
+                    if result['singularity']:
+                        st.caption(f"ⓘ **Singularity:** Multiple actions: **{', '.join(result['singularity'])}**.")
                     with st.expander("✨ Get AI Rewrite Suggestion"):
                         if not st.session_state.api_key:
                             st.warning("Please enter your Google AI API Key.")
                         else:
-                            if st.button(f"Rewrite Requirement {result['id']}", key=result['id']):
+                            if st.button(f"Rewrite Requirement {result['id']}", key=f"rewrite_{result['id']}"):
                                 with st.spinner("AI is thinking..."):
                                     suggestion = get_ai_suggestion(st.session_state.api_key, result['text'])
                                     st.info("AI Suggestion:")
@@ -320,12 +449,10 @@ with tab_analyze:
         export_data = []
         for result in results:
             issues = []
-            if result['ambiguous']:
-                issues.append(f"Ambiguity: {', '.join(result['ambiguous'])}")
-            if result['passive']:
-                issues.append(f"Passive Voice: {', '.join(result['passive'])}")
-            if result['incomplete']:
-                issues.append("Incompleteness: Missing verb.")
+            if result['ambiguous']: issues.append(f"Ambiguity: {', '.join(result['ambiguous'])}")
+            if result['passive']: issues.append(f"Passive Voice: {', '.join(result['passive'])}")
+            if result['incomplete']: issues.append("Incompleteness: Missing verb.")
+            if result['singularity']: issues.append(f"Singularity: {', '.join(result['singularity'])}")
             export_data.append({
                 "ID": result['id'],
                 "Requirement Text": result['text'],
