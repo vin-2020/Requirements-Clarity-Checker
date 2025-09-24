@@ -1,9 +1,10 @@
-# db/database.py
 import sqlite3
+import os
 from datetime import datetime
 from typing import List, Tuple, Optional
 
-DATABASE_NAME = "reqcheck_projects.db"
+# Use ONE consistent DB file
+DB_PATH = os.path.join(os.path.dirname(__file__), "reqcheck.db")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -11,7 +12,7 @@ def get_conn() -> sqlite3.Connection:
     Open a DB connection with foreign key support enabled.
     SQLite requires PRAGMA per-connection.
     """
-    conn = sqlite3.connect(DATABASE_NAME)
+    conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
@@ -103,9 +104,7 @@ def delete_project(project_id: int) -> str:
 # -------------------
 
 def add_document(project_id: int, file_name: str, version: int, score: Optional[int]) -> int:
-    """
-    Adds a document record and returns its ID.
-    """
+    """Adds a document record and returns its ID."""
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -122,10 +121,7 @@ def add_document(project_id: int, file_name: str, version: int, score: Optional[
 
 
 def add_requirements(doc_id: int, requirements: List[Tuple[str, str]]) -> None:
-    """
-    Adds a list of requirements to a document.
-    `requirements` is a list of (req_id_string, req_text).
-    """
+    """Adds a list of requirements to a document."""
     if not requirements:
         return
     conn = get_conn()
@@ -140,9 +136,7 @@ def add_requirements(doc_id: int, requirements: List[Tuple[str, str]]) -> None:
 
 
 def get_documents_for_project(project_id: int) -> List[Tuple[int, str, int, str, Optional[int]]]:
-    """
-    Returns (id, file_name, version, uploaded_at, clarity_score) for all docs in a project.
-    """
+    """Returns (id, file_name, version, uploaded_at, clarity_score) for all docs in a project."""
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -160,14 +154,11 @@ def get_documents_for_project(project_id: int) -> List[Tuple[int, str, int, str,
 
 
 # ------------------------------------------
-# Backward-compatible wrappers (UI currently calls these)
+# Backward-compatible wrappers
 # ------------------------------------------
 
 def add_document_to_project(project_id: int, file_name: str, clarity_score: Optional[int]) -> int:
-    """
-    Adds a new document to a project, auto-incrementing its version for that file_name.
-    Returns the new document ID.
-    """
+    """Adds a new document to a project, auto-incrementing its version for that file_name."""
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
