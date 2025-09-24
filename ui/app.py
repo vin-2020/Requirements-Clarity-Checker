@@ -1,4 +1,4 @@
-# ui/app.py 
+# ui/app.py
 import streamlit as st
 import sys
 import os
@@ -8,6 +8,7 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import pandas as pd
 import inspect
+import importlib
 
 # Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -60,11 +61,10 @@ except Exception:
         return get_ai_suggestion(api_key, prompt)
 
 # Database helpers  (DB memory integration)
-# Database helpers  (DB memory integration)
-from db.database import init_db, add_project, get_all_projects# type: ignore
-from db import database as db  # type: ignore # <-- module import avoids name errors
-import importlib
-db = importlib.reload(db)  
+from db.database import init_db, add_project, get_all_projects  # type: ignore
+from db import database as db  # type: ignore  # <-- module import avoids name errors
+db = importlib.reload(db)  # ensure latest functions (add_document, etc.) are present
+
 # ========================= Helpers for Analyzer =========================
 
 def extract_requirements_from_string(content: str):
@@ -253,7 +253,6 @@ with right_col:
                         st.session_state.delete_project_name = sel_name
                         st.session_state.confirm_delete = True
 
-        # ---------- PASTE THIS CONFIRMATION BLOCK HERE ----------
         # Render confirmation UI (persists across reruns)
         if st.session_state.confirm_delete:
             st.warning(
@@ -280,7 +279,6 @@ with right_col:
                     st.session_state.confirm_delete = False
                     st.session_state.delete_project_id = None
                     st.session_state.delete_project_name = None
-        # -------------------------------------------------------
 
     else:
         st.caption("No projects yet.")
@@ -296,7 +294,6 @@ with right_col:
         else:
             st.error("Please enter a project name.")
 
-
 # ------------------------------ Main Tabs ------------------------------
 with main_col:
     tab_analyze, tab_need, tab_chat = st.tabs([
@@ -305,168 +302,235 @@ with main_col:
         "💬 Requirements Chatbot",
     ])
 
-# ------------------------------ Tab: Analyzer ------------------------------
+# ------------------------------ Tab: Analyzer (Unified) ------------------------------
 with tab_analyze:
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
-    st.header("Analyze a Requirements Document" + (f" — Project: {pname}" if pname else ""))
+    if st.session_state.selected_project is None:
+        st.header("Analyze a Requirements Document")
+        st.warning("Please select or create a project to save your analysis.")
+    else:
+        project_name = st.session_state.selected_project[1]
+        st.header(f"Analyze & Add Documents to: {project_name}")
 
-    uploaded_file = st.file_uploader("Upload your own requirements document", type=['txt', 'docx'])
+    # Current project (if any)
+    project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
 
+    # One uploader for multiple documents
+    uploaded_files = st.file_uploader(
+        "Upload one or more requirements documents (.txt or .docx)",
+        type=['txt', 'docx'],
+        accept_multiple_files=True,
+        key="uploader_unified",
+    )
+
+    # Optional example
     example_files = {
         "Choose an example...": None,
-        "Drone System SRS (Complex Example)": "DRONE_SRS_v1.0.docx"
+        "Drone System SRS (Complex Example)": "DRONE_SRS_v1.0.docx",
     }
-    selected_example = st.selectbox("Or, select an example to get started:", options=list(example_files.keys()))
+    selected_example = st.selectbox(
+        "Or, select an example to analyze:",
+        options=list(example_files.keys()),
+        key="example_unified",
+    )
 
-    requirements_list = []
+    # Build a queue of docs to process: (source_type, display_name, payload)
+    # - source_type == "upload"  -> payload is an UploadedFile
+    # - source_type == "example" -> payload is raw text
+    docs_to_process = []
+
+    if uploaded_files:
+        for up in uploaded_files:
+            docs_to_process.append(("upload", up.name, up))
 
     if selected_example != "Choose an example...":
-        file_path = example_files[selected_example]
+        example_path = example_files[selected_example]
         try:
-            if file_path.endswith('.docx'):
-                d = docx.Document(file_path)
-                content = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
+            if example_path.endswith(".docx"):
+                d = docx.Document(example_path)
+                example_text = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
             else:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-            requirements_list = extract_requirements_from_string(content)
-            st.info(f"Loaded example: **{selected_example}**")
+                with open(example_path, "r", encoding="utf-8") as f:
+                    example_text = f.read()
+            docs_to_process.append(("example", selected_example, example_text))
         except FileNotFoundError:
-            st.error(f"Example file not found: {file_path}. Place it in the project folder.")
+            st.error(f"Example file not found: {example_path}. Place it in the project folder.")
 
-    elif uploaded_file is not None:
-        with st.spinner('Analyzing document... Please wait.'):
-            requirements_list = extract_requirements_from_file(uploaded_file)
-        st.success(f"Analysis complete! Found {len(requirements_list)} requirements.")
+    if docs_to_process:
+        with st.spinner("Processing and analyzing documents..."):
+            saved_count = 0
 
-    if requirements_list:
-        # Analyze each requirement (support both analyzer signatures)
-        results = []
-        for (req_id, req_text) in requirements_list:
-            ambiguous_words = safe_call_ambiguity(req_text, rule_engine)
-            passive_phrases = check_passive_voice(req_text)
-            is_incomplete = check_incompleteness(req_text)
-            singularity_issues = check_singularity(req_text)
-            results.append({
-                'id': req_id,
-                'text': req_text,
-                'ambiguous': ambiguous_words,
-                'passive': passive_phrases,
-                'incomplete': is_incomplete,
-                'singularity': singularity_issues
-            })
+            for src_type, display_name, payload in docs_to_process:
+                # --- Extract requirements ---
+                if src_type == "upload":
+                    reqs = extract_requirements_from_file(payload)  # UploadedFile
+                else:
+                    reqs = extract_requirements_from_string(payload)  # text from example
 
-        # In ui/app.py, replace the "Analysis Summary" section
-        st.divider()
-        st.header("Analysis Summary")
+                total_reqs = len(reqs)
+                if total_reqs == 0:
+                    st.warning(f"⚠️ No recognizable requirements in **{display_name}**.")
+                    continue
 
-        total_reqs = len(requirements_list)
+                # --- Analyze requirements (re-using your checks) ---
+                results = []
+                issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
 
-        # Count a requirement as flagged if it has ANY issue type
-        flagged_reqs = sum(
-            1 for r in results
-            if r.get('ambiguous') or r.get('passive') or r.get('incomplete') or r.get('singularity')
-        )
+                for rid, rtext in reqs:
+                    ambiguous   = safe_call_ambiguity(rtext, rule_engine)
+                    passive     = check_passive_voice(rtext)
+                    incomplete  = check_incompleteness(rtext)
+                    try:
+                        singular = check_singularity(rtext)
+                    except Exception:
+                        singular = []
 
-        # Simple clarity metric = % clear
-        clarity_score = int(((total_reqs - flagged_reqs) / total_reqs) * 100) if total_reqs else 100
+                    if ambiguous:  issue_counts["Ambiguity"] += 1
+                    if passive:    issue_counts["Passive Voice"] += 1
+                    if incomplete: issue_counts["Incompleteness"] += 1
+                    if singular:   issue_counts["Singularity"] += 1
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Requirements", total_reqs)
-        col2.metric("Flagged for Issues", flagged_reqs)
-        col3.metric("Clarity Score", f"{clarity_score} / 100")
+                    results.append({
+                        "id": rid,
+                        "text": rtext,
+                        "ambiguous": ambiguous,
+                        "passive": passive,
+                        "incomplete": incomplete,
+                        "singularity": singular,
+                    })
 
-        # If Streamlit warns about st.progress expecting 0..1, use clarity_score/100
-        st.progress(clarity_score)
-
-        if clarity_score >= 90:
-            st.balloons()
-
-        # Build per-issue counts for the chart
-        issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
-        for r in results:
-            if r.get('ambiguous'):     issue_counts["Ambiguity"] += 1
-            if r.get('passive'):       issue_counts["Passive Voice"] += 1
-            if r.get('incomplete'):    issue_counts["Incompleteness"] += 1
-            if r.get('singularity'):   issue_counts["Singularity"] += 1
-
-        st.subheader("Issues by Type")
-        st.bar_chart(issue_counts)
-
-        # ----- Word cloud -----
-        all_ambiguous_words = []
-        for r in results:
-            if r.get('ambiguous'):
-                all_ambiguous_words.extend(r['ambiguous'])
-
-        with st.expander("View Common Weak Words Cloud"):
-            if all_ambiguous_words:
-                text_for_cloud = ' '.join(all_ambiguous_words)
-                wordcloud = WordCloud(width=800, height=300, background_color='white', collocations=False).generate(text_for_cloud)
-                fig, ax = plt.subplots()
-                ax.imshow(wordcloud, interpolation='bilinear')
-                ax.axis("off")
-                st.pyplot(fig)
-            else:
-                st.write("No ambiguous words found.")
-
-        st.divider()
-        st.header("Detailed Analysis")
-
-        for result in results:
-            is_flagged = result['ambiguous'] or result['passive'] or result['incomplete'] or result['singularity']
-            if is_flagged:
-                with st.container(border=True):
-                    formatted_html = format_requirement_with_highlights(result['id'], result['text'], result)
-                    st.markdown(formatted_html, unsafe_allow_html=True)
-                    if result['ambiguous']:
-                        st.caption(f"ⓘ **Ambiguity:** Found weak words: **{', '.join(result['ambiguous'])}**.")
-                    if result['passive']:
-                        st.caption(f"ⓘ **Passive Voice:** Found phrase: **'{', '.join(result['passive'])}'**. Consider active voice.")
-                    if result['incomplete']:
-                        st.caption("ⓘ **Incompleteness:** Requirement appears to be a fragment.")
-                    if result['singularity']:
-                        st.caption(f"ⓘ **Singularity:** Multiple actions: **{', '.join(result['singularity'])}**.")
-                    with st.expander("✨ Get AI Rewrite Suggestion"):
-                        if not st.session_state.api_key:
-                            st.warning("Please enter your Google AI API Key.")
-                        else:
-                            if st.button(f"Rewrite Requirement {result['id']}", key=f"rewrite_{result['id']}"):
-                                with st.spinner("AI is thinking..."):
-                                    suggestion = get_ai_suggestion(st.session_state.api_key, result['text'])
-                                    st.info("AI Suggestion:")
-                                    st.markdown(f"> {suggestion}")
-            else:
-                success_html = (
-                    f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
-                    f'border-radius:5px;margin-bottom:10px;">✅ <strong>{result["id"]}</strong> {result["text"]}</div>'
+                # --- Scoring: simple percent clear ---
+                flagged_total = sum(
+                    1 for r in results
+                    if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
                 )
-                st.markdown(success_html, unsafe_allow_html=True)
+                clarity_score = int(((total_reqs - flagged_total) / total_reqs) * 100) if total_reqs else 100
 
-        st.divider()
-        st.header("Export Report")
+                # --- Save to DB if helpers exist and a project is selected ---
+                if project_id is not None:
+                    try:
+                        # Prefer new helpers if available
+                        if hasattr(db, "add_document") and hasattr(db, "add_requirements") and hasattr(db, "get_documents_for_project"):
+                            existing = []
+                            try:
+                                existing = [d for d in db.get_documents_for_project(project_id) if d[1] == display_name]
+                            except Exception:
+                                existing = []
+                            next_version = (max([d[2] for d in existing], default=0) + 1)
+                            doc_id = db.add_document(project_id, display_name, next_version, clarity_score)
+                            db.add_requirements(doc_id, reqs)
+                            saved_count += 1
+                        # Fallback to legacy helpers
+                        elif hasattr(db, "add_document_to_project") and hasattr(db, "add_requirements_to_document"):
+                            doc_id = db.add_document_to_project(project_id, display_name, clarity_score)
+                            db.add_requirements_to_document(doc_id, reqs)
+                            saved_count += 1
+                        else:
+                            st.info("Analysis done — DB helpers not found, so nothing was saved.")
+                    except Exception as e:
+                        st.warning(f"Saved analysis for **{display_name}**, but DB write failed: {e}")
 
-        export_data = []
-        for result in results:
-            issues = []
-            if result['ambiguous']: issues.append(f"Ambiguity: {', '.join(result['ambiguous'])}")
-            if result['passive']: issues.append(f"Passive Voice: {', '.join(result['passive'])}")
-            if result['incomplete']: issues.append("Incompleteness: Missing verb.")
-            if result['singularity']: issues.append(f"Singularity: {', '.join(result['singularity'])}")
-            export_data.append({
-                "ID": result['id'],
-                "Requirement Text": result['text'],
-                "Status": "Clear" if not issues else "Flagged",
-                "Issues Found": "; ".join(issues)
-            })
-        df = pd.DataFrame(export_data)
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download Report as CSV",
-            data=csv,
-            file_name=f"ReqCheck_Report.csv",
-            mime="text/csv"
-        )
+                # --- Per-document results UI ---
+                with st.expander(f"📄 {display_name} — Clarity {clarity_score}/100 • {total_reqs} requirements"):
+                    flagged_total = sum(
+                        1 for r in results
+                        if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
+                    )
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total Requirements", total_reqs)
+                    c2.metric("Flagged", flagged_total)
+                    c3.metric("Clarity Score", f"{clarity_score} / 100")
+                    st.progress(clarity_score)  # if your Streamlit expects 0..1, use clarity_score/100
+
+                    st.subheader("Issues by Type")
+                    st.bar_chart(issue_counts)
+
+                    # Word cloud of ambiguous terms
+                    all_ambiguous_words = []
+                    for r in results:
+                        if r["ambiguous"]:
+                            all_ambiguous_words.extend(r["ambiguous"])
+                    with st.expander("Common Weak Words (Word Cloud)"):
+                        if all_ambiguous_words:
+                            text_for_cloud = " ".join(all_ambiguous_words)
+                            wordcloud = WordCloud(
+                                width=800, height=300, background_color="white", collocations=False
+                            ).generate(text_for_cloud)
+                            fig, ax = plt.subplots()
+                            ax.imshow(wordcloud, interpolation="bilinear")
+                            ax.axis("off")
+                            st.pyplot(fig)
+                        else:
+                            st.write("No ambiguous words found.")
+
+                    st.subheader("Detailed Analysis")
+                    for r in results:
+                        is_flagged = r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
+                        if is_flagged:
+                            with st.container(border=True):
+                                st.markdown(
+                                    format_requirement_with_highlights(r["id"], r["text"], r),
+                                    unsafe_allow_html=True,
+                                )
+                                if r["ambiguous"]:
+                                    st.caption(f"ⓘ **Ambiguity:** {', '.join(r['ambiguous'])}")
+                                if r["passive"]:
+                                    st.caption(f"ⓘ **Passive Voice:** {', '.join(r['passive'])}")
+                                if r["incomplete"]:
+                                    st.caption("ⓘ **Incompleteness** detected.")
+                                if r["singularity"]:
+                                    st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
+
+                                # Optional AI rewrite (uses your existing helper & API key)
+                                with st.expander("✨ Get AI Rewrite Suggestion"):
+                                    if not st.session_state.api_key:
+                                        st.warning("Please enter your Google AI API Key.")
+                                    else:
+                                        if st.button(
+                                            f"Rewrite Requirement {r['id']} ({display_name})",
+                                            key=f"rewrite_{display_name}_{r['id']}",
+                                        ):
+                                            with st.spinner("AI is thinking..."):
+                                                suggestion = get_ai_suggestion(st.session_state.api_key, r["text"])
+                                            st.info("AI Suggestion:")
+                                            st.markdown(f"> {suggestion}")
+                        else:
+                            st.markdown(
+                                f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
+                                f'border-radius:5px;margin-bottom:10px;">✅ <strong>{r["id"]}</strong> {r["text"]}</div>',
+                                unsafe_allow_html=True,
+                            )
+
+            if saved_count:
+                st.success(f"Successfully saved {saved_count} document(s) to the project.")
+
+    st.divider()
+    st.header("Documents in this Project")
+
+    # NEW: show documents actually saved in the DB (if a project is selected)
+    if st.session_state.selected_project is None:
+        st.info("Select a project to view its saved documents.")
+    else:
+        pid = st.session_state.selected_project[0]
+        try:
+            if hasattr(db, "get_documents_for_project"):
+                rows = db.get_documents_for_project(pid)
+                if not rows:
+                    st.info("No documents have been added to this project yet.")
+                else:
+                    doc_data = []
+                    for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
+                        doc_data.append({
+                            "File Name": file_name,
+                            "Version": version,
+                            "Uploaded On": uploaded_at.split("T")[0] if isinstance(uploaded_at, str) else uploaded_at,
+                            "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
+                        })
+                    st.dataframe(pd.DataFrame(doc_data), use_container_width=True)
+            else:
+                st.info("get_documents_for_project() not found in db.database.")
+        except Exception as e:
+            st.error(f"Failed to load documents for this project: {e}")
 
 # ------------------------------ Tab: Need Helper ------------------------------
 with tab_need:
