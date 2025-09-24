@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import inspect
 import importlib
+import sqlite3  # <-- added to catch IntegrityError
 
 # Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -53,11 +54,11 @@ except Exception:
             parts = msg.get("parts", [])
             text = parts[0] if parts else ""
             convo.append(f"{role.upper()}: {text}")
-        prompt = (
-            "You are a Systems Engineering assistant. Answer briefly and precisely.\n\n"
-            + "\n".join(convo)
-            + "\nASSISTANT:"
-        )
+            prompt = (
+                "You are a Systems Engineering assistant. Answer briefly and precisely.\n\n"
+                + "\n".join(convo)
+                + "\nASSISTANT:"
+            )
         return get_ai_suggestion(api_key, prompt)
 
 # --- NEW (safe import for AI extractor) ---
@@ -259,6 +260,44 @@ def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, 
         flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
         clear_reqs = max(0, total_reqs - flagged_reqs)
         return int((clear_reqs / total_reqs) * 100) if total_reqs else 100
+def _open_db_conn():
+    """
+    Open a connection to the SAME SQLite DB the db module is using.
+    Tries, in order:
+      - db.get_connection() (reuse existing connection)
+      - db.DB_PATH / DB_FILE / DB_NAME / DATABASE_PATH (string path)
+      - common filenames next to db module: reqcheck.db, database.db, app.db
+    """
+    # 1) Reuse existing connection if the module exposes it.
+    if hasattr(db, "get_connection"):
+        try:
+            conn = db.get_connection()
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return conn, False  # do not close (owned by db module)
+        except Exception:
+            pass
+
+    # 2) Known path attributes on the module.
+    for attr in ("DB_PATH", "DB_FILE", "DB_NAME", "DATABASE_PATH"):
+        path = getattr(db, attr, None)
+        if isinstance(path, str) and path:
+            conn = sqlite3.connect(path)
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return conn, True
+
+    # 3) Try common filenames in the db package directory.
+    base_dir = os.path.dirname(db.__file__)
+    for name in ("reqcheck.db", "database.db", "app.db"):
+        candidate = os.path.join(base_dir, name)
+        if os.path.exists(candidate):
+            conn = sqlite3.connect(candidate)
+            conn.execute("PRAGMA foreign_keys = ON;")
+            return conn, True
+
+    raise RuntimeError(
+        "Could not locate the SQLite DB file. "
+        "Expose DB_PATH in db.database or provide db.get_connection()."
+    )
 
 # =============================== UI Setup ===============================
 
@@ -369,12 +408,82 @@ with right_col:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Confirm Delete", key="btn_confirm_delete_proj_right"):
-                    # sanity check and delete
-                    if hasattr(db, "delete_project"):
-                        db.delete_project(st.session_state.delete_project_id)
+                    # === ROBUST RAW-SQL CASCADE DELETE (ONLY THIS BLOCK CHANGED) ===
+                    pid_to_delete = st.session_state.delete_project_id
+
+                    def _get_tables(conn):
+                        cur = conn.cursor()
+                        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                        return [r[0] for r in cur.fetchall()]
+
+                    def _fk_refs(conn, ref_table_name):
+                        """
+                        Return list of (table, from_col) pairs for all tables that have a FK to ref_table_name.
+                        """
+                        refs = []
+                        for t in _get_tables(conn):
+                            try:
+                                cur = conn.cursor()
+                                cur.execute(f"PRAGMA foreign_key_list('{t}')")
+                                for (id_, seq, table, from_col, to_col, on_update, on_delete, match) in cur.fetchall():
+                                    if table == ref_table_name:
+                                        refs.append((t, from_col))
+                            except Exception:
+                                pass
+                        return refs
+
+                    try:
+                        conn, _should_close = _open_db_conn()
+                        cur = conn.cursor()
+                        cur.execute("PRAGMA foreign_keys = ON;")
+
+                        # 1) Gather document ids for the project
+                        cur.execute("SELECT id FROM documents WHERE project_id = ?", (pid_to_delete,))
+                        doc_ids = [r[0] for r in cur.fetchall()]
+
+                        if doc_ids:
+                            # 2) Delete ALL rows in ANY table that references 'documents'
+                            refs_to_documents = _fk_refs(conn, "documents")
+                            for (tbl, col) in refs_to_documents:
+                                qmarks = ",".join("?" for _ in doc_ids)
+                                cur.execute(f"DELETE FROM {tbl} WHERE {col} IN ({qmarks})", doc_ids)
+
+                            # 3) Now delete requirements explicitly, then documents  <<< CHANGED PART
+                            qmarks = ",".join("?" for _ in doc_ids)
+                            try:
+                                cur.execute(f"DELETE FROM requirements WHERE document_id IN ({qmarks})", doc_ids)
+                            except Exception:
+                                pass
+                            cur.execute(f"DELETE FROM documents WHERE id IN ({qmarks})", doc_ids)
+
+                        # 4) Delete ALL rows in ANY table that references 'projects'
+                        refs_to_projects = _fk_refs(conn, "projects")
+                        for (tbl, col) in refs_to_projects:
+                            cur.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (pid_to_delete,))
+
+                        # 5) Finally delete the project
+                        cur.execute("DELETE FROM projects WHERE id = ?", (pid_to_delete,))
+                        conn.commit()
+                        if _should_close:
+                         conn.close()
+
+
                         st.success("Project deleted.")
-                    else:
-                        st.error("delete_project() is not available in db.database. Did you save and reload?")
+
+                    except sqlite3.IntegrityError as e:
+                        # Extra diagnostics to show what blocked the delete
+                        try:
+                            cur.execute("PRAGMA foreign_key_check;")
+                            problems = cur.fetchall()
+                        except Exception:
+                            problems = []
+                        if problems:
+                            st.error(f"Delete failed due to FK constraints. Offending rows: {problems}")
+                        else:
+                            st.error(f"Delete failed due to foreign key constraints: {e}")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
                     # clear state regardless
                     st.session_state.confirm_delete = False
                     st.session_state.delete_project_id = None
@@ -731,7 +840,6 @@ with tab_analyze:
                 st.info("get_documents_for_project() not found in db.database.")
         except Exception as e:
             st.error(f"Failed to load documents for this project: {e}")
-
 
 # ------------------------------ Tab: Need Helper ------------------------------
 with tab_need:
