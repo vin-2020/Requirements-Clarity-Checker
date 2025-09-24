@@ -60,6 +60,15 @@ except Exception:
         )
         return get_ai_suggestion(api_key, prompt)
 
+# --- NEW (safe import for AI extractor) ---
+try:
+    from llm.ai_suggestions import extract_requirements_with_ai
+    HAS_AI_PARSER = True
+except Exception:
+    HAS_AI_PARSER = False
+    def extract_requirements_with_ai(*args, **kwargs):
+        return []  # fallback
+
 # Database helpers  (DB memory integration)
 from db.database import init_db, add_project, get_all_projects  # type: ignore
 from db import database as db  # type: ignore  # <-- module import avoids name errors
@@ -67,26 +76,120 @@ db = importlib.reload(db)  # ensure latest functions (add_document, etc.) are pr
 
 # ========================= Helpers for Analyzer =========================
 
+def _read_docx_text_and_rows(uploaded_file):
+    """
+    Returns (flat_text, table_rows) where:
+      - flat_text is all paragraph + cell text joined with newlines
+      - table_rows is a list of rows (each row = list[str] of cell texts)
+    """
+    d = docx.Document(uploaded_file)
+    parts = []
+
+    # paragraphs
+    for p in d.paragraphs:
+        t = p.text.strip()
+        if t:
+            parts.append(t)
+
+    # tables
+    rows = []
+    for tbl in d.tables:
+        for r in tbl.rows:
+            row_cells = []
+            for c in r.cells:
+                cell_text = " ".join(p.text.strip() for p in c.paragraphs if p.text.strip())
+                row_cells.append(cell_text)
+                if cell_text:
+                    parts.append(cell_text)
+            rows.append(row_cells)
+
+    flat_text = "\n".join(parts)
+    return flat_text, rows
+
+def _extract_requirements_from_table_rows(table_rows):
+    """
+    If the DOCX has a requirements table with headers like:
+      ID | Requirement | Rationale | Verification | Acceptance Criteria
+    this will harvest (id, text) pairs robustly.
+    """
+    if not table_rows:
+        return []
+
+    def _norm(s): return (s or "").strip().lower()
+
+    # Find a header row
+    header_idx = None
+    for i, row in enumerate(table_rows):
+        cells = [_norm(c) for c in row]
+        if not cells:
+            continue
+        if ("id" in cells[0] and any("requirement" in c for c in cells)):
+            header_idx = i
+            break
+        if ("requirement" in cells[0] and any(c == "id" for c in cells)):
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return []
+
+    # Map columns
+    header = [_norm(c) for c in table_rows[header_idx]]
+    id_col = None
+    req_col = None
+    for idx, h in enumerate(header):
+        if h == "id":
+            id_col = idx
+        if "requirement" in h:
+            req_col = idx
+    if id_col is None or req_col is None:
+        return []
+
+    # IDs like SAT-REQ-001, ABC-123, SUBSYS-THERM-42
+    id_pat = re.compile(r'^[A-Z][A-Z0-9-]*-\d+$')
+
+    out = []
+    for row in table_rows[header_idx + 1:]:
+        if len(row) <= max(id_col, req_col):
+            continue
+        rid = (row[id_col] or "").strip()
+        rtx = (row[req_col] or "").strip()
+        if not rid or not rtx:
+            continue
+        if id_pat.match(rid):
+            out.append((rid, rtx))
+    return out
+
 def extract_requirements_from_string(content: str):
-    """Extract (id, text) pairs like 'SYS-001 ...' or '1.' lines."""
+    """Extract (id, text) pairs like 'SAT-REQ-001 ...' or '1.' lines."""
     requirements = []
-    req_pattern = re.compile(r'^((?:[A-Z]+-\d+)|(?:\d+\.))\s+(.*)')
+    # IDs like ABC-1, ABC-REQ-001, SUBSYS-THERM-42 or numbered "1."
+    req_pattern = re.compile(r'^(([A-Z][A-Z0-9-]*-\d+)|(\d+\.))\s+(.*)$')
     for line in content.split('\n'):
         line = line.strip()
-        if match := req_pattern.match(line):
-            requirements.append((match.group(1), match.group(2)))
+        m = req_pattern.match(line)
+        if m:
+            rid = m.group(1)
+            text = m.group(4)
+            requirements.append((rid, text))
     return requirements
 
 def extract_requirements_from_file(uploaded_file):
     """Read .txt/.docx to text, then parse requirements."""
     if uploaded_file.name.endswith('.txt'):
         content = uploaded_file.getvalue().decode("utf-8")
+        table_rows = []
     elif uploaded_file.name.endswith('.docx'):
-        d = docx.Document(uploaded_file)
-        # FIX: proper list comprehension (no stray quotes)
-        content = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
+        content, table_rows = _read_docx_text_and_rows(uploaded_file)
     else:
-        content = ""
+        content, table_rows = "", []
+
+    # Try table-aware extraction first (handles 'ID | Requirement | ...' tables)
+    reqs = _extract_requirements_from_table_rows(table_rows)
+    if reqs:
+        return reqs
+
+    # Fallback to line regex on flattened text
     return extract_requirements_from_string(content)
 
 def format_requirement_with_highlights(req_id, req_text, issues):
@@ -159,7 +262,11 @@ def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, 
 
 # =============================== UI Setup ===============================
 
-st.set_page_config(page_title="ReqCheck Workspace", page_icon="🗂️", layout="wide")
+st.set_page_config(
+    page_title="ReqCheck Workspace",
+    page_icon="https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/Logo.png?raw=true",
+    layout="wide"
+)
 
 # Global CSS
 st.markdown("""
@@ -312,6 +419,11 @@ with tab_analyze:
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
+    # --- NEW: toggle for AI parser (before uploader) ---
+    use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
+    if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
+        st.info("AI Parser not available (missing function or API key). Falling back to Standard Parser.")
+
     # Current project (if any)
     project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
 
@@ -359,13 +471,38 @@ with tab_analyze:
     if docs_to_process:
         with st.spinner("Processing and analyzing documents..."):
             saved_count = 0
+            all_export_rows = []  # NEW: collect all rows across documents for a combined CSV
 
             for src_type, display_name, payload in docs_to_process:
-                # --- Extract requirements ---
+                # --- Extract requirements (AI or standard) ---
                 if src_type == "upload":
-                    reqs = extract_requirements_from_file(payload)  # UploadedFile
+                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                        # Read raw text for AI
+                        if payload.name.endswith(".txt"):
+                            raw = payload.getvalue().decode("utf-8", errors="ignore")
+                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
+                        elif payload.name.endswith(".docx"):
+                            # Read paragraphs + tables
+                            flat_text, table_rows = _read_docx_text_and_rows(payload)
+                            # Prefer deterministic table extraction if a requirements table exists
+                            table_reqs = _extract_requirements_from_table_rows(table_rows)
+                            if table_reqs:
+                                reqs = table_reqs
+                                raw = None  # not used
+                            else:
+                                raw = flat_text
+                                reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
+                        else:
+                            raw = ""
+                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
+                    else:
+                        reqs = extract_requirements_from_file(payload)
                 else:
-                    reqs = extract_requirements_from_string(payload)  # text from example
+                    # example text payload is already a string
+                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                        reqs = extract_requirements_with_ai(st.session_state.api_key, payload)
+                    else:
+                        reqs = extract_requirements_from_string(payload)
 
                 total_reqs = len(reqs)
                 if total_reqs == 0:
@@ -377,18 +514,22 @@ with tab_analyze:
                 issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
 
                 for rid, rtext in reqs:
-                    ambiguous   = safe_call_ambiguity(rtext, rule_engine)
-                    passive     = check_passive_voice(rtext)
-                    incomplete  = check_incompleteness(rtext)
+                    ambiguous = safe_call_ambiguity(rtext, rule_engine)
+                    passive = check_passive_voice(rtext)
+                    incomplete = check_incompleteness(rtext)
                     try:
                         singular = check_singularity(rtext)
                     except Exception:
                         singular = []
 
-                    if ambiguous:  issue_counts["Ambiguity"] += 1
-                    if passive:    issue_counts["Passive Voice"] += 1
-                    if incomplete: issue_counts["Incompleteness"] += 1
-                    if singular:   issue_counts["Singularity"] += 1
+                    if ambiguous:
+                        issue_counts["Ambiguity"] += 1
+                    if passive:
+                        issue_counts["Passive Voice"] += 1
+                    if incomplete:
+                        issue_counts["Incompleteness"] += 1
+                    if singular:
+                        issue_counts["Singularity"] += 1
 
                     results.append({
                         "id": rid,
@@ -441,6 +582,41 @@ with tab_analyze:
                     c2.metric("Flagged", flagged_total)
                     c3.metric("Clarity Score", f"{clarity_score} / 100")
                     st.progress(clarity_score)  # if your Streamlit expects 0..1, use clarity_score/100
+
+                    # --- Export CSV for this single document ---
+                    export_rows = []
+                    for r in results:
+                        issues = []
+                        if r["ambiguous"]:
+                            issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
+                        if r["passive"]:
+                            issues.append(f"Passive Voice: {', '.join(r['passive'])}")
+                        if r["incomplete"]:
+                            issues.append("Incompleteness")
+                        if r["singularity"]:
+                            issues.append(f"Singularity: {', '.join(r['singularity'])}")
+
+                        export_rows.append({
+                            "Document": display_name,
+                            "Requirement ID": r["id"],
+                            "Requirement Text": r["text"],
+                            "Status": "Clear" if not issues else "Flagged",
+                            "Issues Found": "; ".join(issues),
+                        })
+
+                    # Download for this single document
+                    df_doc = pd.DataFrame(export_rows)
+                    csv_doc = df_doc.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label=f"Download '{display_name}' Analysis (CSV)",
+                        data=csv_doc,
+                        file_name=f"{os.path.splitext(display_name)[0]}_ReqCheck_Report.csv",
+                        mime="text/csv",
+                        key=f"dl_csv_{display_name}",
+                    )
+
+                    # Accumulate into "all documents" export
+                    all_export_rows.extend(export_rows)  # NEW
 
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
@@ -504,6 +680,19 @@ with tab_analyze:
             if saved_count:
                 st.success(f"Successfully saved {saved_count} document(s) to the project.")
 
+            # NEW: Combined CSV for all analyzed documents in this run
+            if all_export_rows:
+                st.subheader("Download Combined Analysis")
+                df_all = pd.DataFrame(all_export_rows)
+                csv_all = df_all.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download All Analyzed Documents (CSV)",
+                    data=csv_all,
+                    file_name="ReqCheck_All_Analyzed_Documents.csv",
+                    mime="text/csv",
+                    key="dl_csv_all_docs",
+                )
+
     st.divider()
     st.header("Documents in this Project")
 
@@ -526,11 +715,23 @@ with tab_analyze:
                             "Uploaded On": uploaded_at.split("T")[0] if isinstance(uploaded_at, str) else uploaded_at,
                             "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
                         })
-                    st.dataframe(pd.DataFrame(doc_data), use_container_width=True)
+                    df_docs = pd.DataFrame(doc_data)
+                    st.dataframe(df_docs, use_container_width=True)
+
+                    # NEW: CSV summary of ALL documents saved in this project
+                    proj_csv = df_docs.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        label="Download Project Documents Summary (CSV)",
+                        data=proj_csv,
+                        file_name=f"Project_{pid}_Documents_Summary.csv",
+                        mime="text/csv",
+                        key="dl_csv_project_docs",
+                    )
             else:
                 st.info("get_documents_for_project() not found in db.database.")
         except Exception as e:
             st.error(f"Failed to load documents for this project: {e}")
+
 
 # ------------------------------ Tab: Need Helper ------------------------------
 with tab_need:
