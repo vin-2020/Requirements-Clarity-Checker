@@ -2,7 +2,7 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-<img width="2502" height="966" alt="image" src="https://github.com/user-attachments/assets/3aa1c6e1-db24-4d5d-a975-d179219196e7" />
+<img width="2525" height="1291" alt="Screenshot 2025-09-25 004348" src="https://github.com/user-attachments/assets/55ed198e-6300-46ea-8c94-277643ae5c77" />
 
 ---
 
@@ -17,6 +17,7 @@ An AI-assisted tool designed to help systems engineers and project managers impr
 * **💾 Exportable Reports:** Download the full analysis as a `.csv` file for easy sharing and tracking.
 
 #### AI-Powered Assistant Features
+* **🤖 Intelligent Requirement Extractor:** Uses an LLM to analyze unstructured documents and intelligently extract requirement statements, regardless of format.
 * **💡 AI Rewrite Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements.
 * **✍️ Need-to-Requirement Helper:** Assists engineers in converting vague stakeholder needs into formal "shall" statements.
 * **💬 Requirements Chatbot:** An interactive AI assistant to discuss and refine requirements in real-time.
@@ -36,7 +37,7 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/vin-2020/Requirements-Clarity-Checker.git
+    git clone [https://github.com/vin-2020/Requirements-Clarity-Checker.git](https://github.com/vin-2020/Requirements-Clarity-Checker.git)
     ```
 
 2.  **Navigate to the project directory:**
@@ -80,7 +81,7 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 * [x] **Phase 1 (MVP):** Core ambiguity analysis engine (Command-line).
 * [x] **Phase 2 (v2.0):** Functional UI with advanced NLP checks and AI assistance features.
-* [ ] **Phase 3 (v3.0):** Evolve into a "Project Workspace" with a database to manage projects and track quality over time.
+* [/] **Phase 3 (v3.0):** Evolving into a "Project Workspace" with a database and AI-powered parser. *(In Progress)*
 
 ---
 
