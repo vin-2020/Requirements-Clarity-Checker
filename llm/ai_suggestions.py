@@ -40,11 +40,19 @@ def get_ai_suggestion(api_key, requirement_text):
         # Model choice kept exactly as in your original code
         model = genai.GenerativeModel('gemini-1.5-flash')
 
-        # Prompt kept identical to preserve behavior/outputs
+        # --- NEW, highly-detailed INCOSE-aligned prompt you provided ---
         prompt = f"""
-        You are an expert Systems Engineer following INCOSE standards. 
-        Your task is to rewrite the following requirement to be more clear, specific, active, and measurable.
-        
+        You are a lead Systems Engineer acting as a mentor. Your task is to review and rewrite a single requirement statement to make it exemplary.
+
+        Follow these critical INCOSE-based principles for your rewrite:
+        1.  **Verifiable:** The requirement must be testable. Replace subjective words (like "easy", "fast", "efficient") with specific, measurable criteria (like "within 500ms", "with 99.9% accuracy").
+        2.  **Unambiguous:** The requirement must have only one possible interpretation. Use clear, direct language.
+        3.  **Singular:** The requirement MUST state only a single capability. DO NOT use words like "and" or "or" to combine multiple requirements.
+        4.  **Active Voice:** The requirement must be in the active voice (e.g., "The system shall...").
+        5.  **Concise:** Remove unnecessary words like "be able to" or "be capable of".
+
+        CRITICAL INSTRUCTION: Your final output must be ONLY the rewritten requirement sentence and nothing else. Do not add preambles like "Here is the rewritten requirement:".
+
         Original Requirement: "{requirement_text}"
         
         Rewritten Requirement:
@@ -306,3 +314,38 @@ TEXT:
         unique.append((rid, txt))
 
     return unique
+
+
+@st.cache_data
+def decompose_requirement_with_ai(api_key, requirement_text):
+    """
+    Uses the Gemini LLM to decompose a complex requirement into multiple singular requirements.
+    Returns a plain numbered list string.
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        prompt = f"""
+        You are an expert Systems Engineer. Your task is to analyze the following requirement.
+        If it is not singular, decompose it into a set of clear, singular, and verifiable requirements.
+
+        CRITICAL INSTRUCTIONS:
+        1. Analyze the original requirement to identify all distinct ideas (actions, constraints, metrics).
+        2. Rewrite each idea as its own requirement in active voice: "The system shall ...".
+        3. Each requirement must be a single sentence and testable.
+        4. If the original requirement has an ID (e.g., "SYS-001"), assign incremental child IDs (e.g., "SYS-001.1", "SYS-001.2").
+        5. Ensure **scope control**: do not add new conditions beyond the original requirement unless they are logically implied. If unsure, keep the decomposition minimal.
+        6. Ensure **consistency**: separate system capability requirements from process/documentation requirements. Do not mix them in the same sentence.
+        7. Ensure **normative language**: use "shall". Only upgrade "should" to "shall" if the intent is clearly mandatory.
+        8. OUTPUT FORMAT: Return ONLY a numbered list, one item per line, with no extra commentary or markdown.
+
+        Original Requirement: "{requirement_text}"
+        """
+
+        resp = model.generate_content(prompt)
+        out = (getattr(resp, "text", "") or "").strip()
+        return out if out else "No decomposition produced."
+    except Exception as e:
+        return f"An error occurred with the AI service: {e}"
+
