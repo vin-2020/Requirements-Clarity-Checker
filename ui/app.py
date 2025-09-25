@@ -465,8 +465,7 @@ with right_col:
                         cur.execute("DELETE FROM projects WHERE id = ?", (pid_to_delete,))
                         conn.commit()
                         if _should_close:
-                         conn.close()
-
+                            conn.close()
 
                         st.success("Project deleted.")
 
@@ -590,9 +589,15 @@ with tab_analyze:
                         if payload.name.endswith(".txt"):
                             raw = payload.getvalue().decode("utf-8", errors="ignore")
                             reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
+                            # ---- Fallback if AI found nothing (txt) ----
+                            if not reqs and raw:
+                                reqs = extract_requirements_from_string(raw)
                         elif payload.name.endswith(".docx"):
                             # Read paragraphs + tables
                             flat_text, table_rows = _read_docx_text_and_rows(payload)
+
+                           
+
                             # Prefer deterministic table extraction if a requirements table exists
                             table_reqs = _extract_requirements_from_table_rows(table_rows)
                             if table_reqs:
@@ -601,6 +606,9 @@ with tab_analyze:
                             else:
                                 raw = flat_text
                                 reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
+                                # ---- Fallback if AI found nothing (docx, no table) ----
+                                if not reqs and raw:
+                                    reqs = extract_requirements_from_string(raw)
                         else:
                             raw = ""
                             reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
