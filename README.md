@@ -2,24 +2,29 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-<img width="2525" height="1291" alt="Screenshot 2025-09-25 004348" src="https://github.com/user-attachments/assets/55ed198e-6300-46ea-8c94-277643ae5c77" />
+![ReqCheck Screenshot](https://github.com/user-attachments/assets/3aa1c6e1-db24-4d5d-a975-d179219196e7)
 
 ---
 
 ### 🚀 Key Features
 
+#### Analysis Features
 * **🗂️ Project Workspace:** Create projects to store and manage multiple requirement documents in one place, with a persistent database backend.
 * **📄 Document Analysis:** Upload and analyze requirements from `.txt` and `.docx` files within a project.
 * **📈 Quality Scoring:** Get an overall "Clarity Score" for your document.
-* **⚠️ Issue Detection:** Automatically flags common issues like ambiguity, passive voice, and incompleteness.
+* **⚠️ Issue Detection:** Automatically flags common issues like:
+    * **Ambiguity:** Catches subjective and weak words.
+    * **Passive Voice:** Identifies passive constructions using `spaCy`.
+    * **Incompleteness:** Detects requirement fragments that are missing a verb.
+    * **Singularity:** Flags requirements that contain multiple actions (e.g., using "and"/"or"), which should be split apart.
 * **📊 Visual Reporting:** A summary bar chart and word cloud visualize the most common issues.
 * **📝 Detailed Feedback:** Provides a line-by-line, color-coded analysis with educational tooltips.
 * **💾 Exportable Reports:** Download the full analysis as a `.csv` file for easy sharing and tracking.
 
 #### AI-Powered Assistant Features
 * **🤖 Intelligent Requirement Extractor:** Uses an LLM to analyze unstructured documents and intelligently extract requirement statements, regardless of format.
-* **💡 AI Rewrite Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements.
-* **✍️ Need-to-Requirement Helper:** Assists engineers in converting vague stakeholder needs into formal "shall" statements.
+* **💡 AI Rewrite & Decompose Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements or decompose complex requirements into multiple singular ones.
+* **✍️ Interactive Requirement Tutor:** A guided, form-based tool that teaches newcomers the correct structure of a high-quality requirement (Actor, Action, Object, Constraint) and uses AI to review the final result.
 * **💬 Requirements Chatbot:** An interactive AI assistant to discuss and refine requirements in real-time.
 
 ---
@@ -73,15 +78,15 @@ Follow these instructions to get a copy of the project up and running on your lo
     * Once a project is loaded, paste your secret Google AI API Key into the password box to enable the AI features.
 
 4.  📊 **Start Analyzing!**
-    * You can now use any of the three tabs: "Document Analyzer," "Need-to-Requirement Helper," or the "Requirements Chatbot" for your selected project.
+    * You can now use any of the three tabs: "Document Analyzer," the "Interactive Requirement Tutor," or the "Requirements Chatbot" for your selected project.
 
 ---
 
 ### 🗺️ Project Roadmap
 
 * [x] **Phase 1 (MVP):** Core ambiguity analysis engine (Command-line).
-* [x] **Phase 2 (v2.0):** Functional UI with advanced NLP checks and AI assistance features.
-* [/] **Phase 3 (v3.0):** Evolving into a "Project Workspace" with a database and AI-powered parser. *(In Progress)*
+* [x] **Phase 2 (v2.0):** Functional UI with advanced NLP checks and full AI assistance features.
+* [/] **Phase 3 (v3.0):** Evolving into a "Project Workspace" with a database, AI-powered parser, and trend analysis. *(In Progress)*
 
 ---
 
