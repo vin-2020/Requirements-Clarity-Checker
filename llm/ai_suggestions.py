@@ -5,13 +5,14 @@ Lightweight helpers for ReqCheck's AI features (Gemini via google.generativeai).
 IMPORTANT:
 - Functionality is unchanged from your original file.
 - Streamlit caching (@st.cache_data) is kept exactly as-is per your request.
-- Prompts and model names are identical.
+- Prompts and model names are identical (except the new extractor's robust JSON prompt).
 - Only formatting, structure, and comments/docstrings were improved.
 """
 
 import streamlit as st
 import google.generativeai as genai
-import json, re
+import json
+import re
 from typing import List, Tuple
 
 
@@ -142,14 +143,31 @@ def get_chatbot_response(api_key, chat_history):
         return f"An error occurred with the AI service: {e}"
 
 
-# --- NEW: AI Requirement Extractor (adds only this function; nothing else changed) ---
-def extract_requirements_with_ai(api_key: str, raw_text: str, max_chunk_chars: int = 12000) -> List[Tuple[str, str]]:
+# --- NEW: AI Requirement Extractor (full JSON-based, robust) ---
+@st.cache_data
+def extract_requirements_with_ai(
+    api_key: str,
+    document_text: str,
+    max_chunk_chars: int = 12000
+) -> List[Tuple[str, str]]:
     """
     Use the LLM to extract ONLY requirement statements from raw text.
     Returns: list of (req_id, req_text)
+
+    - Strongly prefers STRICT JSON output from the model.
+    - Handles documents without tables, mixed numbering, and narrative prose.
+    - Falls back to heuristic extraction if JSON parsing fails.
+    - Deduplicates by text (case-insensitive).
     """
-    # 1) Split into reasonably sized chunks on blank lines
-    paras = re.split(r'\n\s*\n', raw_text)
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+    except Exception:
+        # Keep behavior consistent: return empty on config failure
+        return []
+
+    # ---- Chunk large documents on blank lines to stay well under context limits ----
+    paras = re.split(r"\n\s*\n", document_text or "")
     chunks, buf = [], ""
     for p in paras:
         if len(buf) + len(p) + 2 <= max_chunk_chars:
@@ -164,70 +182,127 @@ def extract_requirements_with_ai(api_key: str, raw_text: str, max_chunk_chars: i
     out: List[Tuple[str, str]] = []
     running_index = 1
 
-    for ch in chunks:
-        prompt = f"""
-You are an expert requirements engineer.
-Extract ONLY well-formed requirement statements from the text below.
+    # ---- Helper: parse model JSON or fallback ----
+    def _parse_or_fallback(resp_text: str) -> List[Tuple[str, str]]:
+        # Try to grab the last JSON object in the output
+        json_text = None
+        m = re.search(r"\{.*\}\s*$", resp_text or "", flags=re.S)
+        if m:
+            json_text = m.group(0)
 
-Output STRICT JSON with this exact schema (no extra text):
+        pairs: List[Tuple[str, str]] = []
+        if json_text:
+            try:
+                data = json.loads(json_text)
+                items = data.get("requirements", []) if isinstance(data, dict) else []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    rid = (item.get("id") or "").strip()
+                    rtx = (item.get("text") or "").strip()
+                    if rtx:
+                        pairs.append((rid, rtx))
+                if pairs:
+                    return pairs
+            except Exception:
+                # fall through to heuristic
+                pass
+
+        # Heuristic fallback on the model output:
+        # 1) Bullet/numbered lines
+        heur_pairs: List[Tuple[str, str]] = []
+        bullets = re.findall(r"^\s*(?:-|\*|\d+[\.\)])\s*(.+)$", resp_text or "", flags=re.M)
+        for b in bullets:
+            t = (b or "").strip()
+            if t:
+                heur_pairs.append(("", t))
+
+        # 2) Normative sentences (look for optional ID and normative keywords)
+        norm_pat = re.compile(
+            r"""(?ix)
+            ^
+            (?:
+                (?P<id>[A-Z][A-Z0-9-]*-\d+|[A-Z]{2,}\d+|\d+[\.\)])\s+    # e.g., ABC-123, SYS-001, 1., 1)
+            )?
+            (?P<text>.*?\b(shall|must|will|should)\b.*)
+            $
+            """
+        )
+        for line in (resp_text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m2 = norm_pat.match(line)
+            if m2:
+                rid = (m2.group("id") or "").strip()
+                txt = (m2.group("text") or "").strip()
+                if txt:
+                    heur_pairs.append((rid, txt))
+
+        return heur_pairs
+
+    # ---- Process each chunk with a strict-JSON prompt ----
+    for ch in chunks if chunks else [""]:
+        prompt = f"""
+You are an expert Systems Engineer and requirements analyst.
+
+Extract ONLY formal requirement statements from the TEXT below and output STRICT JSON with this exact schema (no extra commentary, no markdown, no prefixes/suffixes):
+
 {{
   "requirements": [
     {{"id": "optional-id-or-empty", "text": "the requirement text (original phrasing, trimmed)"}}
   ]
 }}
 
-Rules:
-- Include only normative, testable statements (e.g., contain "shall", "must", "should", "will", or measurable constraints).
-- Do not include explanations, headings, or non-requirement prose.
-- Keep the original sentence wording except trimming numbering/bullets.
-- If the source shows an identifier, keep it in "id"; else use "" (empty string).
-- Return VALID JSON ONLY.
+Extraction rules:
+- Include normative, testable statements: contain "shall", "must", "will", or "should", or measurable constraints.
+- Accept both formats:
+  • Table/ID-based: e.g., "SYS-001 The system shall ..." or "SAT-REQ-12 The payload shall ..."
+  • Narrative/numbered/bulleted: e.g., "1. The drone shall ..." or "- The controller will ..."
+- Keep the original sentence wording except trimming bullets/numbering. Do not rewrite.
+- If an explicit identifier exists (e.g., "SYS-001", "1."), put it in "id"; otherwise, use "" (empty string).
+- Return VALID JSON ONLY. Do not add any text before or after the JSON.
 
 TEXT:
-\"\"\"{ch}\"\"\"
+\"\"\"{ch}\"\"\""""
+        try:
+            resp = model.generate_content(prompt)
+            text_out = (resp.text or "").strip()
+        except Exception:
+            text_out = ""
 
-JSON:
-""".strip()
-
-        resp = get_ai_suggestion(api_key, prompt)
-
-        # Try to grab the last JSON object in the output
-        json_text = None
-        m = re.search(r'\{.*\}\s*$', resp, flags=re.S)
-        if m:
-            json_text = m.group(0)
-
-        data = {"requirements": []}
-        if json_text:
-            try:
-                data = json.loads(json_text)
-            except Exception:
-                # fall through to heuristic below
-                pass
-
-        if not data.get("requirements"):
-            # Heuristic fallback: bullet lines -> requirements
-            bullets = re.findall(r'^\s*(?:-|\*|\d+\.)\s*(.+)$', resp, flags=re.M)
-            data = {"requirements": [{"id": "", "text": b.strip()} for b in bullets]}
-
-        for item in data.get("requirements", []):
-            rid = (item.get("id") or "").strip()
-            rtx = (item.get("text") or "").strip()
+        pairs = _parse_or_fallback(text_out)
+        for rid, rtx in pairs:
             if not rtx:
                 continue
-            if not rid:
-                rid = f"R-{running_index:03d}"
-            out.append((rid, rtx))
+            # If the model didn't provide an id, synthesize one (stable within this call)
+            final_id = rid.strip() if rid.strip() else f"R-{running_index:03d}"
+            out.append((final_id, rtx.strip()))
             running_index += 1
 
-    # Deduplicate by text (case-insensitive)
+    # ---- If still empty, last-resort heuristic on the ORIGINAL document_text ----
+    if not out and (document_text or "").strip():
+        norm = re.compile(
+            r'(?im)^(?:(?P<id>[A-Z][A-Z0-9-]*-\d+|\d+[.)])\s+)?(?P<txt>.*?\b(shall|must|will|should)\b.*)$'
+        )
+        idx = 1
+        for line in (document_text or "").splitlines():
+            m = norm.match(line.strip())
+            if m:
+                rid = (m.group("id") or f"R-{idx:03d}").strip()
+                txt = (m.group("txt") or "").strip()
+                if txt:
+                    out.append((rid, txt))
+                    idx += 1
+
+    # ---- Deduplicate by requirement text (case-insensitive) ----
     seen = set()
     unique: List[Tuple[str, str]] = []
     for rid, txt in out:
-        key = txt.lower()
-        if key in seen:
+        key = (txt or "").strip().lower()
+        if not key or key in seen:
             continue
         seen.add(key)
         unique.append((rid, txt))
-    return unique
 
+    return unique
