@@ -39,27 +39,32 @@ except Exception:
         def __init__(self):
             pass
 
-# LLM helpers
-from llm.ai_suggestions import get_ai_suggestion, generate_requirement_from_need
-try:
-    from llm.ai_suggestions import get_chatbot_response
-except Exception:
-    def get_chatbot_response(api_key: str, history: list[dict]) -> str:
-        """
-        Fallback: flattens chat history into a single prompt and uses get_ai_suggestion().
-        """
-        convo = []
-        for msg in history:
-            role = msg.get("role", "user")
-            parts = msg.get("parts", [])
-            text = parts[0] if parts else ""
-            convo.append(f"{role.upper()}: {text}")
-            prompt = (
-                "You are a Systems Engineering assistant. Answer briefly and precisely.\n\n"
-                + "\n".join(convo)
-                + "\nASSISTANT:"
-            )
-        return get_ai_suggestion(api_key, prompt)
+# LLM helpers (robust, reloadable)
+import importlib
+from llm import ai_suggestions as ai  # module import
+
+ai = importlib.reload(ai)  # ensure latest functions are picked up
+
+# Core helpers (these should exist)
+get_ai_suggestion = getattr(ai, "get_ai_suggestion")
+generate_requirement_from_need = getattr(ai, "generate_requirement_from_need")
+
+# Optional helpers with safe fallbacks
+get_chatbot_response = getattr(
+    ai, "get_chatbot_response",
+    lambda api_key, history: get_ai_suggestion(api_key, "\n".join(
+        f"{m.get('role','user').upper()}: { (m.get('parts') or [m.get('content','')])[0] }"
+        for m in history
+    ) + "\nASSISTANT:")
+)
+
+# New decomposition helper (now actually defined in ai_suggestions.py)
+decompose_requirement_with_ai = getattr(
+    ai, "decompose_requirement_with_ai",
+    lambda api_key, requirement_text: "Decomposition helper failed to load."
+)
+
+
 
 # --- NEW (safe import for AI extractor) ---
 try:
@@ -596,8 +601,6 @@ with tab_analyze:
                             # Read paragraphs + tables
                             flat_text, table_rows = _read_docx_text_and_rows(payload)
 
-                           
-
                             # Prefer deterministic table extraction if a requirements table exists
                             table_reqs = _extract_requirements_from_table_rows(table_rows)
                             if table_reqs:
@@ -774,19 +777,34 @@ with tab_analyze:
                                 if r["singularity"]:
                                     st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
 
-                                # Optional AI rewrite (uses your existing helper & API key)
-                                with st.expander("✨ Get AI Rewrite Suggestion"):
+                                # Optional AI rewrite / decompose (uses your existing helper & API key)
+                                with st.expander("✨ Get AI Rewrite / Decomposition"):
                                     if not st.session_state.api_key:
                                         st.warning("Please enter your Google AI API Key.")
                                     else:
-                                        if st.button(
-                                            f"Rewrite Requirement {r['id']} ({display_name})",
-                                            key=f"rewrite_{display_name}_{r['id']}",
-                                        ):
-                                            with st.spinner("AI is thinking..."):
-                                                suggestion = get_ai_suggestion(st.session_state.api_key, r["text"])
-                                            st.info("AI Suggestion:")
-                                            st.markdown(f"> {suggestion}")
+                                        # Buttons row: always show Rewrite; show Decompose only if singularity present
+                                        if r["singularity"]:
+                                            col1, col2 = st.columns(2)
+                                        else:
+                                            col1 = st.columns(1)[0]
+
+                                        with col1:
+                                            if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
+                                                with st.spinner("AI is thinking..."):
+                                                    suggestion = get_ai_suggestion(st.session_state.api_key, r['text'])
+                                                st.info("AI Suggestion (Rewrite):")
+                                                st.markdown(f"> {suggestion}")
+
+                                        if r["singularity"]:
+                                            with col2:
+                                                if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
+                                                    with st.spinner("AI is decomposing..."):
+                                                        decomposed_reqs = decompose_requirement_with_ai(
+                                                            st.session_state.api_key,
+                                                            f"{r['id']} {r['text']}"
+                                                        )
+                                                    st.info("AI Suggestion (Decomposition):")
+                                                    st.markdown(decomposed_reqs)
                         else:
                             st.markdown(
                                 f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
@@ -810,44 +828,7 @@ with tab_analyze:
                     key="dl_csv_all_docs",
                 )
 
-    st.divider()
-    st.header("Documents in this Project")
 
-    # NEW: show documents actually saved in the DB (if a project is selected)
-    if st.session_state.selected_project is None:
-        st.info("Select a project to view its saved documents.")
-    else:
-        pid = st.session_state.selected_project[0]
-        try:
-            if hasattr(db, "get_documents_for_project"):
-                rows = db.get_documents_for_project(pid)
-                if not rows:
-                    st.info("No documents have been added to this project yet.")
-                else:
-                    doc_data = []
-                    for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
-                        doc_data.append({
-                            "File Name": file_name,
-                            "Version": version,
-                            "Uploaded On": uploaded_at.split("T")[0] if isinstance(uploaded_at, str) else uploaded_at,
-                            "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
-                        })
-                    df_docs = pd.DataFrame(doc_data)
-                    st.dataframe(df_docs, use_container_width=True)
-
-                    # NEW: CSV summary of ALL documents saved in this project
-                    proj_csv = df_docs.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="Download Project Documents Summary (CSV)",
-                        data=proj_csv,
-                        file_name=f"Project_{pid}_Documents_Summary.csv",
-                        mime="text/csv",
-                        key="dl_csv_project_docs",
-                    )
-            else:
-                st.info("get_documents_for_project() not found in db.database.")
-        except Exception as e:
-            st.error(f"Failed to load documents for this project: {e}")
 
 # ------------------------------ Tab: Need Helper ------------------------------
 with tab_need:
