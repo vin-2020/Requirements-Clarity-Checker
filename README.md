@@ -2,7 +2,7 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-![ReqCheck Screenshot](https://github.com/user-attachments/assets/3aa1c6e1-db24-4d5d-a975-d179219196e7)
+<img width="2420" height="1293" alt="image" src="https://github.com/user-attachments/assets/eed041d1-61fc-41a0-a128-90344673ea4d" />
 
 ---
 
