@@ -527,10 +527,11 @@ with tab_analyze:
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     if st.session_state.selected_project is None:
         st.header("Analyze a Requirements Document")
-        st.warning("Please select or create a project to save your analysis.")
+        st.warning("You can analyze documents without a project, but results won’t be saved.")
     else:
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
+
 
     # --- NEW: toggle for AI parser (before uploader) ---
     use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
@@ -545,7 +546,7 @@ with tab_analyze:
         "Upload one or more requirements documents (.txt or .docx)",
         type=['txt', 'docx'],
         accept_multiple_files=True,
-        key="uploader_unified",
+        key=f"uploader_unified_{project_id or 'none'}",  
     )
 
     # Optional example
@@ -813,7 +814,13 @@ with tab_analyze:
                             )
 
             if saved_count:
-                st.success(f"Successfully saved {saved_count} document(s) to the project.")
+              st.success(f"Successfully saved {saved_count} document(s) to the project.")
+    # Clear uploader state so files aren’t reprocessed
+              uploader_key = f"uploader_unified_{project_id or 'none'}"
+              st.session_state.pop(uploader_key, None)
+    # Also clear the example selector so it doesn’t re-add an example on refresh
+              st.session_state.pop("example_unified", None)
+
 
             # NEW: Combined CSV for all analyzed documents in this run
             if all_export_rows:
@@ -827,6 +834,46 @@ with tab_analyze:
                     mime="text/csv",
                     key="dl_csv_all_docs",
                 )
+                # --- Project library (document versions) ---
+st.divider()
+st.header("Documents in this Project")
+
+if st.session_state.selected_project is None:
+    st.info("Select a project to view its saved documents.")
+else:
+    pid = st.session_state.selected_project[0]
+    try:
+        if hasattr(db, "get_documents_for_project"):
+            rows = db.get_documents_for_project(pid)  # (doc_id, file_name, version, uploaded_at, clarity_score)
+            if not rows:
+                st.info("No documents have been added to this project yet.")
+            else:
+                # One row per version
+                doc_data = []
+                for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
+                    doc_data.append({
+                        "File Name": file_name,
+                        "Version": version,
+                        "Uploaded On": uploaded_at.replace("T", " ")[:19] if isinstance(uploaded_at, str) else uploaded_at,
+                        "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
+                    })
+                df_docs = pd.DataFrame(doc_data).sort_values(["File Name","Version"], ascending=[True, False])
+                st.dataframe(df_docs, use_container_width=True)
+
+                # Export summary
+                proj_csv = df_docs.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download Project Documents Summary (CSV)",
+                    data=proj_csv,
+                    file_name=f"Project_{pid}_Documents_Summary.csv",
+                    mime="text/csv",
+                    key="dl_csv_project_docs",
+                )
+        else:
+            st.info("get_documents_for_project() not found in db.database.")
+    except Exception as e:
+        st.error(f"Failed to load documents for this project: {e}")
+
 
 
 
