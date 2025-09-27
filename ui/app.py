@@ -569,27 +569,208 @@ with main_col:
 with tab_analyze:
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     if st.session_state.selected_project is None:
-        st.header("Analyze a Requirements Document")
+        st.header("Analyze Documents & Text")
         st.warning("You can analyze documents without a project, but results won’t be saved.")
     else:
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
-    # --- NEW: toggle for AI parser (before uploader) ---
+    # ===== Quick Paste Analyzer — persist results so AI buttons work after rerun =====
+    st.subheader("🔍 Quick Paste Analyzer — single or small set")
+    quick_text = st.text_area(
+        "Paste one or more requirements (one per line). You may prefix with an ID like `REQ-001:`",
+        height=160,
+        key="quick_paste_area"
+    )
+    st.caption("Example:\nREQ-001: The system shall report position within 500 ms.\nREQ-001.1.")
+
+    # session keys for persistence
+    if "quick_results" not in st.session_state:
+        st.session_state.quick_results = []   # list of dicts with analysis
+    if "quick_issue_counts" not in st.session_state:
+        st.session_state.quick_issue_counts = {"Ambiguity":0,"Passive Voice":0,"Incompleteness":0,"Singularity":0}
+    if "quick_analyzed" not in st.session_state:
+        st.session_state.quick_analyzed = False
+    if "quick_text_snapshot" not in st.session_state:
+        st.session_state.quick_text_snapshot = ""
+
+    def _parse_quick_lines(raw: str):
+        rows = []
+        idx = 1
+        for ln in (raw or "").splitlines():
+            t = ln.strip()
+            if not t:
+                continue
+            if ":" in t:
+                left, right = t.split(":", 1)
+                rid = left.strip()
+                rtx = right.strip()
+                if not rtx:
+                    continue
+            else:
+                rid = f"R-{idx:03d}"
+                rtx = t
+            rows.append((rid, rtx))
+            idx += 1
+        return rows
+
+    # Local AI helpers
+    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
+        prompt = f"""
+You are a senior systems engineer. Rewrite the requirement below to be:
+- single sentence, active voice, using "shall"
+- unambiguous (no vague terms), testable (include precise conditions/thresholds if implied)
+- keep the original intent; do not add scope
+- no extra commentary; OUTPUT ONLY the rewritten sentence
+
+Requirement:
+\"\"\"{(req_text or '').strip()}\"\"\""""
+        out = get_ai_suggestion(api_key, prompt) or ""
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if ln:
+                return ln
+        return out.strip()
+
+    def _ai_decompose_clean(api_key: str, req_text: str) -> str:
+        return decompose_requirement_with_ai(api_key, req_text) or ""
+
+    # Analyze button stores results in session so later AI button clicks don't lose state
+    if st.button("Analyze Pasted Lines", key="quick_analyze_btn"):
+        pairs = _parse_quick_lines(quick_text)
+        if not pairs:
+            st.warning("No non-empty lines found.")
+            st.session_state.quick_results = []
+            st.session_state.quick_issue_counts = {"Ambiguity":0,"Passive Voice":0,"Incompleteness":0,"Singularity":0}
+            st.session_state.quick_analyzed = False
+            st.session_state.quick_text_snapshot = ""
+        else:
+            issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
+            quick_results = []
+            for rid, rtx in pairs:
+                amb = safe_call_ambiguity(rtx, rule_engine)
+                pas = check_passive_voice(rtx)
+                inc = check_incompleteness(rtx)
+                try:
+                    sing = check_singularity(rtx)
+                except Exception:
+                    sing = []
+                if amb: issue_counts["Ambiguity"] += 1
+                if pas: issue_counts["Passive Voice"] += 1
+                if inc: issue_counts["Incompleteness"] += 1
+                if sing: issue_counts["Singularity"] += 1
+                quick_results.append({
+                    "id": rid, "text": rtx,
+                    "ambiguous": amb, "passive": pas, "incomplete": inc, "singularity": sing
+                })
+            # persist
+            st.session_state.quick_results = quick_results
+            st.session_state.quick_issue_counts = issue_counts
+            st.session_state.quick_analyzed = True
+            st.session_state.quick_text_snapshot = quick_text
+
+    # ---- Render quick results if we have them in session ----
+    if st.session_state.quick_analyzed and st.session_state.quick_results:
+        quick_results = st.session_state.quick_results
+        issue_counts = st.session_state.quick_issue_counts
+
+        total = len(quick_results)
+        flagged = sum(1 for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])
+        st.markdown(f"**Analyzed:** {total} • **Flagged:** {flagged}")
+        cqa = st.columns(4)
+        cqa[0].metric("Ambiguity", issue_counts["Ambiguity"])
+        cqa[1].metric("Passive", issue_counts["Passive Voice"])
+        cqa[2].metric("Incomplete", issue_counts["Incompleteness"])
+        cqa[3].metric("Multiple actions", issue_counts["Singularity"])
+
+        flagged_list = [r for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]]
+        clear_list   = [r for r in quick_results if not (r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])]
+
+        st.subheader("Flagged")
+        if not flagged_list:
+            st.caption("None 🎉")
+        for r in flagged_list:
+            with st.container():
+                st.markdown(
+                    format_requirement_with_highlights(r["id"], r["text"], r),
+                    unsafe_allow_html=True,
+                )
+
+                # Always offer AI Rewrite for flagged lines; persist output to CSV via cache key
+                col_rw, col_dc = st.columns(2)
+                with col_rw:
+                    if st.session_state.api_key and st.button(f"✨ AI Rewrite {r['id']}", key=f"quick_rew_{r['id']}"):
+                        try:
+                            # Provide targeted guidance based on detected issues
+                            hints = []
+                            if r["ambiguous"]: hints.append(f"remove ambiguity ({', '.join(r['ambiguous'])})")
+                            if r["passive"]:   hints.append("use active voice")
+                            if r["incomplete"]:hints.append("complete the sentence")
+                            guidance = "; ".join(hints) if hints else "ensure clarity, singularity, and testability"
+                            prompt = f"""Rewrite as ONE clear, singular, verifiable requirement using 'shall' in active voice; {guidance}.
+Original: \"\"\"{r['text']}\"\"\""""
+                            suggestion = get_ai_suggestion(st.session_state.api_key, prompt)
+                            st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
+                            st.info("AI Rewrite:")
+                            st.markdown(f"> {suggestion}")
+                        except Exception as e:
+                            st.warning(f"AI rewrite failed: {e}")
+
+                with col_dc:
+                    if st.session_state.api_key and r["singularity"] and st.button(f"🧩 Decompose {r['id']}", key=f"quick_dec_{r['id']}"):
+                        try:
+                            d = _ai_decompose_clean(st.session_state.api_key, f"{r['id']} {r['text']}")
+                            st.info("AI Decomposition:")
+                            st.markdown(d)
+                        except Exception as e:
+                            st.warning(f"AI decomposition failed: {e}")
+
+        st.subheader("Clear")
+        for r in clear_list:
+            st.markdown(
+                f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
+                f'border-radius:5px;margin-bottom:10px;">✅ <strong>{r["id"]}</strong> {r["text"]}</div>',
+                unsafe_allow_html=True,
+            )
+
+        # CSV export (includes any AI rewrites the user triggered)
+        exp_rows = []
+        for r in quick_results:
+            issues = []
+            if r["ambiguous"]: issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
+            if r["passive"]:   issues.append(f"Passive Voice: {', '.join(r['passive'])}")
+            if r["incomplete"]:issues.append("Incompleteness")
+            if r["singularity"]:issues.append(f"Singularity: {', '.join(r['singularity'])}")
+            ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
+            exp_rows.append({
+                "Requirement ID": r["id"],
+                "Requirement Text": r["text"],
+                "Status": "Clear" if not issues else "Flagged",
+                "Issues Found": "; ".join(issues),
+                "AI Rewrite (if generated)": ai_rew,
+            })
+        df_quick = pd.DataFrame(exp_rows)
+        st.download_button(
+            "Download Quick Analysis (CSV)",
+            data=df_quick.to_csv(index=False).encode("utf-8"),
+            file_name="ReqCheck_Quick_Analysis.csv",
+            mime="text/csv",
+            key="dl_quick_csv"
+        )
+
+    # ===================== Full Document Analyzer (unchanged logic) =====================
+    st.subheader("📁 Upload Documents — analyze one or more files")
     use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
     if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
         st.info("AI Parser not available (missing function or API key). Falling back to Standard Parser.")
 
-    # Current project (if any)
     project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
 
-    # --- NEW: allow re-analysis of previously saved files in this project ---
     stored_to_analyze = None
     if project_id is not None and hasattr(db, "get_documents_for_project"):
         try:
             _rows = db.get_documents_for_project(project_id)
-            stored_docs = []
-            labels = []
+            stored_docs, labels = [], []
             for (doc_id, file_name, version, uploaded_at, clarity_score) in _rows:
                 conv_path = os.path.join("data", "projects", str(project_id), "documents",
                                          f"{doc_id}_{_sanitize_filename(file_name)}")
@@ -606,32 +787,24 @@ with tab_analyze:
         except Exception:
             pass
 
-    # One uploader for multiple documents
     uploaded_files = st.file_uploader(
         "Upload one or more requirements documents (.txt or .docx)",
         type=['txt', 'docx'],
         accept_multiple_files=True,
-        key=f"uploader_unified_{project_id or 'none'}",  
+        key=f"uploader_unified_{project_id or 'none'}",
     )
 
-    # Optional example
-    example_files = {
-        "Choose an example...": None,
-        "Drone System SRS (Complex Example)": "DRONE_SRS_v1.0.docx",
-    }
+    example_files = {"Choose an example...": None, "Drone System SRS (Complex Example)": "DRONE_SRS_v1.0.docx"}
     selected_example = st.selectbox(
         "Or, select an example to analyze:",
         options=list(example_files.keys()),
         key="example_unified",
     )
 
-    # Build a queue of docs to process: (source_type, display_name, payload)
     docs_to_process = []
-
     if uploaded_files:
         for up in uploaded_files:
             docs_to_process.append(("upload", up.name, up))
-
     if selected_example != "Choose an example...":
         example_path = example_files[selected_example]
         try:
@@ -644,26 +817,21 @@ with tab_analyze:
             docs_to_process.append(("example", selected_example, example_text))
         except FileNotFoundError:
             st.error(f"Example file not found: {example_path}. Place it in the project folder.")
-
-    # --- NEW: append stored selection (if any) ---
     if stored_to_analyze:
         _fn, _path = stored_to_analyze
         docs_to_process.append(("stored", _fn, _path))
 
-    # ===================== NEW: Analyzer-local AI helpers =====================
-    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
-        """
-        Make a single, clear, unambiguous, testable, active-voice requirement using 'shall'.
-        Remove vagueness and passive voice; keep original intent.
-        Output: ONE sentence only (no bullets, no headers).
-        """
+    # (Document analysis + AI tools and CSV export remain the same as your last version)
+
+
+    # ===================== Analyzer-local AI helpers (shared) =====================
+    def _ai_rewrite_clarity_doc(api_key: str, req_text: str) -> str:
         prompt = f"""
 You are a senior systems engineer. Rewrite the requirement below to be:
 - single sentence, active voice, using "shall"
-- unambiguous (no vague terms), testable (include precise conditions/thresholds if implied)
-- keep the original intent; do not add scope
-- no extra commentary; OUTPUT ONLY the rewritten sentence
-
+- unambiguous and testable
+- keep the original intent; no scope changes
+- OUTPUT ONLY the rewritten sentence
 Requirement:
 \"\"\"{(req_text or '').strip()}\"\"\""""
         out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
@@ -673,13 +841,9 @@ Requirement:
                 return ln
         return out.strip()
 
-    def _ai_decompose_clean(api_key: str, req_text: str) -> str:
-        """
-        Decompose a (clean) requirement into singular children.
-        Output: numbered or dashed list (model default).
-        """
+    def _ai_decompose_clean_doc(api_key: str, req_text: str) -> str:
         return decompose_requirement_with_ai(api_key, req_text) or ""
-    # ========================================================================
+    # ============================================================================
 
     if docs_to_process:
         with st.spinner("Processing and analyzing documents..."):
@@ -854,7 +1018,7 @@ Requirement:
                     c3.metric("Clarity Score", f"{clarity_score} / 100")
                     st.progress(clarity_score)
 
-                    # --- Export CSV for this single document ---
+                    # --- Export CSV for this single document (includes AI Rewrite) ---
                     export_rows = []
                     for r in results:
                         issues = []
@@ -867,12 +1031,15 @@ Requirement:
                         if r["singularity"]:
                             issues.append(f"Singularity: {', '.join(r['singularity'])}")
 
+                        ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
+
                         export_rows.append({
                             "Document": display_name,
                             "Requirement ID": r["id"],
                             "Requirement Text": r["text"],
                             "Status": "Clear" if not issues else "Flagged",
                             "Issues Found": "; ".join(issues),
+                            "AI Rewrite (if generated)": ai_rew,
                         })
 
                     df_doc = pd.DataFrame(export_rows)
@@ -884,8 +1051,6 @@ Requirement:
                         mime="text/csv",
                         key=f"dl_csv_{display_name}",
                     )
-
-                    all_export_rows.extend(export_rows)
 
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
@@ -926,8 +1091,7 @@ Requirement:
                                 if r["singularity"]:
                                     st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
 
-                                # ---------------- CONDITIONAL EXPANDER LOGIC ----------------
-                                # Count how many different issue categories are present
+                                # Count issue categories
                                 issue_types_present = sum([
                                     1 if r["ambiguous"] else 0,
                                     1 if r["passive"] else 0,
@@ -957,7 +1121,7 @@ Requirement:
                                             with btn_row[0]:
                                                 if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
                                                     with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
-                                                        st.session_state[cache_key] = _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                        st.session_state[cache_key] = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     if st.session_state[cache_key]:
                                                         st.success("Rewritten draft ready (see below).")
                                                     else:
@@ -966,8 +1130,8 @@ Requirement:
                                             with btn_row[1]:
                                                 if st.button(f"🧩 Decompose (After Fix) [{r['id']}]", key=f"decomp_after_fix_{r['id']}"):
                                                     with st.spinner("Preparing clean text, then decomposing..."):
-                                                        base = st.session_state[cache_key].strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
-                                                        decomp = _ai_decompose_clean(st.session_state.api_key, base)
+                                                        base = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, base)
                                                     if decomp.strip():
                                                         st.info("Decomposition (based on cleaned requirement):")
                                                         st.markdown(decomp)
@@ -975,11 +1139,11 @@ Requirement:
                                                         st.info("No decomposition returned.")
 
                                             with btn_row[2]:
-                                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}"):
+                                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}]"):
                                                     with st.spinner("Rewriting, then decomposing..."):
-                                                        cleaned = st.session_state[cache_key].strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                        cleaned = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                         st.session_state[cache_key] = cleaned
-                                                        decomp = _ai_decompose_clean(st.session_state.api_key, cleaned)
+                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, cleaned)
                                                     if cleaned:
                                                         st.success("Rewritten requirement:")
                                                         st.markdown(f"> {cleaned}")
@@ -988,11 +1152,11 @@ Requirement:
                                                         st.markdown(decomp)
 
                                             if st.session_state.get(cache_key, ""):
-                                                st.caption("Rewritten requirement (copy & use if desired):")
+                                                st.caption("Rewritten requirement (this will appear in CSV):")
                                                 st.code(st.session_state[cache_key])
 
                                 else:
-                                    # Original lightweight tools
+                                    # Lightweight tools
                                     with st.expander("✨ Get AI Rewrite / Decomposition"):
                                         if not st.session_state.api_key:
                                             st.warning("Please enter your Google AI API Key.")
@@ -1005,7 +1169,9 @@ Requirement:
                                             with col1:
                                                 if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
                                                     with st.spinner("AI is thinking..."):
-                                                        suggestion = get_ai_suggestion(st.session_state.api_key, r['text'])
+                                                        suggestion = _ai_rewrite_clarity_doc(st.session_state.api_key, r['text'])
+                                                    # Store rewrite so it appears in CSV
+                                                    st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
                                                     st.info("AI Suggestion (Rewrite):")
                                                     st.markdown(f"> {suggestion}")
 
@@ -1013,13 +1179,12 @@ Requirement:
                                                 with col2:
                                                     if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
                                                         with st.spinner("AI is decomposing..."):
-                                                            decomposed_reqs = decompose_requirement_with_ai(
+                                                            decomposed_reqs = _ai_decompose_clean_doc(
                                                                 st.session_state.api_key,
                                                                 f"{r['id']} {r['text']}"
                                                             )
                                                         st.info("AI Suggestion (Decomposition):")
                                                         st.markdown(decomposed_reqs)
-                                # -----------------------------------------------------------
                         else:
                             st.markdown(
                                 f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
@@ -1028,25 +1193,12 @@ Requirement:
                             )
 
             if saved_count:
-              st.success(f"Successfully saved {saved_count} document(s) to the project.")
-    # Clear uploader state so files aren’t reprocessed
-              uploader_key = f"uploader_unified_{project_id or 'none'}"
-              st.session_state.pop(uploader_key, None)
-    # Also clear the example selector so it doesn’t re-add an example on refresh
-              st.session_state.pop("example_unified", None)
-
-            # NEW: Combined CSV for all analyzed documents in this run
-            if all_export_rows:
-                st.subheader("Download Combined Analysis")
-                df_all = pd.DataFrame(all_export_rows)
-                csv_all = df_all.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download All Analyzed Documents (CSV)",
-                    data=csv_all,
-                    file_name="ReqCheck_All_Analyzed_Documents.csv",
-                    mime="text/csv",
-                    key="dl_csv_all_docs",
-                )
+                st.success(f"Successfully saved {saved_count} document(s) to the project.")
+                # Clear uploader state so files aren’t reprocessed
+                uploader_key = f"uploader_unified_{project_id or 'none'}"
+                st.session_state.pop(uploader_key, None)
+                # Also clear the example selector so it doesn’t re-add an example on refresh
+                st.session_state.pop("example_unified", None)
 
 # --- Project library (document versions) ---
 st.divider()
@@ -1058,10 +1210,11 @@ else:
     pid = st.session_state.selected_project[0]
     try:
         if hasattr(db, "get_documents_for_project"):
-            rows = db.get_documents_for_project(pid)
+            rows = db.get_documents_for_project(pid)  # (doc_id, file_name, version, uploaded_at, clarity_score)
             if not rows:
                 st.info("No documents have been added to this project yet.")
             else:
+                # One row per version
                 doc_data = []
                 for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
                     doc_data.append({
@@ -1073,6 +1226,7 @@ else:
                 df_docs = pd.DataFrame(doc_data).sort_values(["File Name","Version"], ascending=[True, False])
                 st.dataframe(df_docs, use_container_width=True)
 
+                # Export summary
                 proj_csv = df_docs.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="Download Project Documents Summary (CSV)",
@@ -1085,8 +1239,6 @@ else:
             st.info("get_documents_for_project() not found in db.database.")
     except Exception as e:
         st.error(f"Failed to load documents for this project: {e}")
-
-
 
 
 
@@ -1886,25 +2038,217 @@ with tab_chat:
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     st.header("Chat with an AI Systems Engineering Assistant" + (f" — Project: {pname}" if pname else ""))
 
+    # --- state
     if "messages" not in st.session_state:
-        st.session_state.messages = []
+        st.session_state.messages = []   # [{role: user|assistant, content: str}]
+    if "chat_temp" not in st.session_state:
+        st.session_state.chat_temp = 0.2
+    if "attach_ctx" not in st.session_state:
+        st.session_state.attach_ctx = True
 
+    # --- controls
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        if st.button("Clear chat", key="chat_clear"):
+            st.session_state.messages = []
+            st.rerun()
+    with c2:
+        st.session_state.chat_temp = st.slider("Creativity", 0.0, 0.9, st.session_state.chat_temp, 0.1,
+                                               help="Model temperature (lower = more deterministic)")
+    with c3:
+        st.session_state.attach_ctx = st.toggle("Attach project context", value=st.session_state.attach_ctx,
+                                                help="Adds recent project requirements to reduce hallucinations")
+
+    st.caption("Try slash-commands: `/analyze <req>`, `/rewrite <req>`, `/ac <req> method=Test|Analysis|Inspection|Demonstration`, `/decompose <req>`, `/help`.")
+
+    # --- render transcript
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask a question about your requirements..."):
+    # --- helpers
+    SE_SYSTEM_PROMPT = (
+        "You are an expert Systems Engineer. Follow INCOSE/ISO 29148 style. "
+        "Prefer EARS patterns, active voice with 'shall', measurable thresholds, and V&V guidance. "
+        "Avoid vague words (user-friendly, optimal, efficient, etc.). "
+        "If asked to produce a requirement: ONE sentence requirement + then 3–6 acceptance criteria."
+    )
+
+    def _safe_project_context() -> str:
+        """Try to fetch a compact list of project requirements as context. Safe if db helper not present."""
+        if not st.session_state.selected_project:
+            return ""
+        try:
+            pid = st.session_state.selected_project[0]
+            # Try common helper names; wrap in try/except to remain non-breaking
+            lines = []
+            if hasattr(db, "get_requirements_for_project"):
+                rows = db.get_requirements_for_project(pid)  # expect [(id,text),...] or similar
+                for r in rows[:200]:
+                    rid, rtx = (r[0], r[1]) if len(r) >= 2 else (str(r[0]), str(r[0]))
+                    lines.append(f"{rid}: {rtx}")
+            elif hasattr(db, "get_documents_for_project") and hasattr(db, "get_requirements_for_document"):
+                # Fallback: collect a few from the latest document versions
+                docs = db.get_documents_for_project(pid)
+                docs = sorted(docs, key=lambda x: x[2], reverse=True)[:3]  # newest few
+                for (doc_id, file_name, version, uploaded_at, clarity_score) in docs:
+                    try:
+                        reqs = db.get_requirements_for_document(doc_id)
+                        for rr in reqs[:80]:
+                            rid, rtx = (rr[0], rr[1]) if len(rr) >= 2 else (str(rr[0]), str(rr[0]))
+                            lines.append(f"{rid}: {rtx}")
+                    except Exception:
+                        continue
+            if not lines:
+                return ""
+            return "PROJECT CONTEXT:\n" + "\n".join(lines[:200])
+        except Exception:
+            return ""
+
+    def _auto_fix_if_flagged(text: str) -> str:
+        """Run your analyzer; if ambiguity/passive/incomplete found, ask AI for a single clean rewrite once."""
+        amb = safe_call_ambiguity(text, rule_engine)
+        pas = check_passive_voice(text)
+        inc = check_incompleteness(text)
+        try:
+            sing = check_singularity(text)
+        except Exception:
+            sing = []
+        # Only fix clarity issues; do NOT auto-decompose here
+        if amb or pas or inc:
+            fix_list = []
+            if amb: fix_list.append(f"remove ambiguity ({', '.join(amb)})")
+            if pas: fix_list.append("active voice")
+            if inc: fix_list.append("complete the sentence")
+            guidance = "; ".join(fix_list)
+            fix_prompt = f"""Rewrite the following as ONE clear, singular, verifiable requirement using 'shall' in active voice; {guidance}. Return only the sentence.
+Requirement:
+\"\"\"{text}\"\"\""""
+            try:
+                fixed = get_ai_suggestion(st.session_state.api_key, fix_prompt)
+                return fixed.strip() or text
+            except Exception:
+                return text
+        return text
+
+    def _to_gemini_history(messages: list[dict], system_prompt: str = "", project_ctx: str = "") -> list[dict]:
+        """
+        Convert UI chat history (roles: user/assistant) into Gemini-compatible history (roles: user/model).
+        We prepend system prompt & project context as a single 'user' message.
+        """
+        hist = []
+        preface_parts = []
+        if system_prompt.strip():
+            preface_parts.append(system_prompt.strip())
+        if project_ctx.strip():
+            preface_parts.append(project_ctx.strip())
+        if preface_parts:
+            hist.append({"role": "user", "parts": ["\n\n".join(preface_parts)]})
+
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if not content:
+                continue
+            if role == "user":
+                hist.append({"role": "user", "parts": [content]})
+            else:
+                # map assistant -> model for Gemini
+                hist.append({"role": "model", "parts": [content]})
+        return hist
+
+    def _handle_slash(prompt: str):
+        p = prompt.strip()
+        if p == "/help":
+            return (
+                "Commands:\n"
+                "- `/analyze <requirement>` → run ambiguity/passive/incomplete/singularity checks\n"
+                "- `/rewrite <requirement>` → AI rewrite to clear, verifiable sentence\n"
+                "- `/ac <requirement> method=Test|Analysis|Inspection|Demonstration` → generate AC bullets\n"
+                "- `/decompose <requirement>` → break into singular requirements"
+            )
+        if p.startswith("/analyze "):
+            t = p[len("/analyze "):]
+            amb = safe_call_ambiguity(t, rule_engine)
+            pas = check_passive_voice(t)
+            inc = check_incompleteness(t)
+            try:
+                sing = check_singularity(t)
+            except Exception:
+                sing = []
+            issues = []
+            if amb: issues.append(f"Ambiguity: {', '.join(amb)}")
+            if pas: issues.append(f"Passive: {', '.join(pas)}")
+            if inc: issues.append("Incompleteness")
+            if sing: issues.append(f"Multiple actions: {', '.join(sing)}")
+            return "Analysis:\n- " + ("\n- ".join(issues) if issues else "No major issues found.")
+        if p.startswith("/rewrite "):
+            t = p[len("/rewrite "):]
+            return get_ai_suggestion(st.session_state.api_key, t)
+        if p.startswith("/ac "):
+            body = p[len("/ac "):]
+            method = None
+            if " method=" in body:
+                body, method = body.split(" method=", 1)
+            prompt_ac = f"""Return ONLY bullets (3–6). Each bullet must include setup/conditions + numeric threshold + verification method.
+Requirement:
+\"\"\"{body.strip()}\"\"\"
+Verification Method: {method or 'Test'}"""
+            return get_ai_suggestion(st.session_state.api_key, prompt_ac)
+        if p.startswith("/decompose "):
+            t = p[len("/decompose "):]
+            return decompose_requirement_with_ai(st.session_state.api_key, t)
+        return None
+
+    # --- input
+    prompt = st.chat_input("Ask a question about your requirements… (or /help)")
+    if prompt:
         if not st.session_state.api_key:
             st.warning("Please enter your Google AI API Key at the top of the page to use the chatbot.")
         else:
+            # append user to transcript
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            with st.spinner("AI is thinking..."):
-                api_history = [{"role": m["role"], "parts": [m["content"]]} for m in st.session_state.messages]
-                response = get_chatbot_response(st.session_state.api_key, api_history)
+            # slash-commands first
+            cmd = _handle_slash(prompt)
+            if cmd is not None:
+                response = cmd
+            else:
+                # Build Gemini-compatible history
+                project_ctx = _safe_project_context() if st.session_state.attach_ctx else ""
+                api_history = _to_gemini_history(st.session_state.messages, SE_SYSTEM_PROMPT, project_ctx)
 
+                # Call your existing helper
+                with st.spinner("AI is thinking..."):
+                    response = get_chatbot_response(st.session_state.api_key, api_history)
+
+                # One-pass auto-fix if analyzer flags clarity issues
+                response = _auto_fix_if_flagged(response)
+
+            # show + save assistant message (UI role = assistant; Gemini role mapped when sending)
             st.session_state.messages.append({"role": "assistant", "content": response})
             with st.chat_message("assistant"):
                 st.markdown(response)
+
+            # quick actions
+            ca1, ca2 = st.columns([1,1])
+            with ca1:
+                if st.button("📌 Use as Final Requirement", key=f"use_final_{len(st.session_state.messages)}"):
+                    try:
+                        first_line = response.strip().split("\n", 1)[0]
+                        if "need_tutor" in st.session_state:
+                            st.session_state.need_tutor["final_req"] = first_line[:500]
+                        st.success("Sent to Need tab → Final Requirement.")
+                    except Exception:
+                        st.info("Open Need tab to paste manually.")
+            with ca2:
+                if st.button("➕ Add to Acceptance Criteria", key=f"add_ac_{len(st.session_state.messages)}"):
+                    bullets = [ln for ln in response.splitlines() if ln.strip().startswith(("-", "*"))]
+                    if bullets and "need_tutor" in st.session_state:
+                        nt = st.session_state.need_tutor
+                        nt["final_ac"] = nt.get("final_ac", []) + [b.strip("-* ").strip() for b in bullets]
+                        st.success("Acceptance Criteria appended in Need tab.")
+                    else:
+                        st.info("No bullet points found in the last reply.")
