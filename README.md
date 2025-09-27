@@ -24,7 +24,11 @@ An AI-assisted tool designed to help systems engineers and project managers impr
 #### AI-Powered Assistant Features
 * **🤖 Intelligent Requirement Extractor:** Uses an LLM to analyze unstructured documents and intelligently extract requirement statements, regardless of format.
 * **💡 AI Rewrite & Decompose Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements or decompose complex requirements into multiple singular ones.
-* **✍️ Interactive Requirement Tutor:** A guided, form-based tool that teaches newcomers the correct structure of a high-quality requirement (Actor, Action, Object, Constraint) and uses AI to review the final result.
+* **✍️ Requirement Authoring Wizard:** A comprehensive environment to guide engineers from a high-level need to a complete, professional requirement.
+    * Features **AI-powered autofill** to parse a stakeholder need and pre-populate a structured requirement template.
+    * Includes live previews with an instant **quality checklist** based on INCOSE standards.
+    * Manages requirement **hierarchy and traceability**, allowing for the creation of parent-child relationships.
+    * Exports the final requirement set to a **professional CSV**, ready for import into other engineering tools like DOORS or Jama.
 * **💬 Requirements Chatbot:** An interactive AI assistant to discuss and refine requirements in real-time.
 
 ---
