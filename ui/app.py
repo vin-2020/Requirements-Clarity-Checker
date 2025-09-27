@@ -15,7 +15,6 @@ import sqlite3  # <-- added to catch IntegrityError
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # ------------------------- Imports from your app -------------------------
-# Analyzer functions (some may not exist in older versions; we shim below)
 from core.analyzer import (
     check_requirement_ambiguity,
     check_passive_voice,
@@ -43,9 +42,9 @@ except Exception:
 import importlib
 from llm import ai_suggestions as ai  # module import
 
-ai = importlib.reload(ai)  # ensure latest functions are picked up
+ai = importlib.reload(ai)  
 
-# Core helpers (these should exist)
+# Core helpers 
 get_ai_suggestion = getattr(ai, "get_ai_suggestion")
 generate_requirement_from_need = getattr(ai, "generate_requirement_from_need")
 
@@ -58,7 +57,7 @@ get_chatbot_response = getattr(
     ) + "\nASSISTANT:")
 )
 
-# New decomposition helper (now actually defined in ai_suggestions.py)
+# New decomposition helper 
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
     lambda api_key, requirement_text: "Decomposition helper failed to load."
@@ -76,8 +75,8 @@ except Exception:
         return []  # fallback
 
 # Database helpers  (DB memory integration)
-from db.database import init_db, add_project, get_all_projects  # type: ignore
-from db import database as db  # type: ignore  # <-- module import avoids name errors
+from db.database import init_db, add_project, get_all_projects  
+from db import database as db  
 db = importlib.reload(db)  # ensure latest functions (add_document, etc.) are present
 
 # ========================= Helpers for Analyzer =========================
@@ -2252,3 +2251,4 @@ Verification Method: {method or 'Test'}"""
                         st.success("Acceptance Criteria appended in Need tab.")
                     else:
                         st.info("No bullet points found in the last reply.")
+
