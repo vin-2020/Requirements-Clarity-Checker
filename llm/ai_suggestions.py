@@ -38,7 +38,7 @@ def get_ai_suggestion(api_key, requirement_text):
         genai.configure(api_key=api_key)
 
         # Model choice kept exactly as in your original code
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
         # --- NEW, highly-detailed INCOSE-aligned prompt you provided ---
         prompt = f"""
@@ -90,7 +90,7 @@ def generate_requirement_from_need(api_key, need_text):
         genai.configure(api_key=api_key)
 
         # Model choice kept exactly as in your original code
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
         # Prompt kept identical to preserve behavior/outputs
         prompt = f"""
@@ -140,7 +140,7 @@ def get_chatbot_response(api_key, chat_history):
         genai.configure(api_key=api_key)
 
         # Model choice kept exactly as in your original code
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
 
         # Directly pass the provided history (unchanged behavior)
         response = model.generate_content(chat_history)
@@ -169,7 +169,7 @@ def extract_requirements_with_ai(
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception:
         # Keep behavior consistent: return empty on config failure
         return []
@@ -250,7 +250,8 @@ def extract_requirements_with_ai(
         return heur_pairs
 
     # ---- Process each chunk with a strict-JSON prompt ----
-    for ch in chunks if chunks else [""]:
+    for ch in (chunks if chunks else [""]):
+
         prompt = f"""
 You are an expert Systems Engineer and requirements analyst.
 
@@ -324,7 +325,7 @@ def decompose_requirement_with_ai(api_key, requirement_text):
     """
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
 
         prompt = f"""
         You are an expert Systems Engineer. Your task is to analyze the following requirement.
@@ -348,4 +349,217 @@ def decompose_requirement_with_ai(api_key, requirement_text):
         return out if out else "No decomposition produced."
     except Exception as e:
         return f"An error occurred with the AI service: {e}"
+# ------------------------------
+# Structured helpers for Req Tutor (non-breaking additions)
+# ------------------------------
+import json
+import re
 
+def _extract_json_or_none(text: str):
+    """Try to parse JSON; tolerate code fences and trailing prose."""
+    if not text:
+        return None
+    # strip common fences
+    m = re.search(r'\{.*\}', text, flags=re.DOTALL)
+    candidate = m.group(0) if m else text.strip()
+    try:
+        return json.loads(candidate)
+    except Exception:
+        return None
+
+def _kv_lines_to_dict(text: str) -> dict:
+    """Fallback parser for 'Key: value' lines."""
+    out = {}
+    for line in (text or "").splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip()
+            v = v.strip().strip("-").strip()
+            if k:
+                out[k] = v
+    return out
+
+# Keys expected by template type
+_NEED_AUTOFILL_FIELDS = {
+    "Functional": ["Actor","Action","Object","Trigger","Conditions","Performance","ModalVerb"],
+    "Performance": ["Function","Metric","Threshold","Unit","Conditions","Measurement","VerificationMethod"],
+    "Constraint": ["Subject","ConstraintText","DriverOrStandard","Rationale"],
+    "Interface": ["System","ExternalSystem","InterfaceStandard","Direction","DataItems","Performance","Conditions"],
+}
+
+@st.cache_data
+def analyze_need_autofill(api_key: str, need_text: str, req_type: str) -> dict:
+    """
+    Return a dict with the fields required by the chosen requirement type.
+    Uses Gemini directly with a strict JSON prompt + light post-processing.
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+    except Exception:
+        # fail-safe: return empty skeleton
+        fields = _NEED_AUTOFILL_FIELDS.get(req_type or "Functional", _NEED_AUTOFILL_FIELDS["Functional"])
+        return {k: "" for k in fields}
+
+    req_type = (req_type or "Functional").strip()
+    fields = _NEED_AUTOFILL_FIELDS.get(req_type, _NEED_AUTOFILL_FIELDS["Functional"])
+
+    # Few-shot anchors
+    if req_type == "Functional":
+        fewshot = """Example (Functional, JSON only):
+{"Actor":"UAV","Action":"present","Object":"low-battery alert to operator","Trigger":"battery state-of-charge < 20%","Conditions":"in all flight modes","Performance":"within 1 s","ModalVerb":"shall"}"""
+    elif req_type == "Performance":
+        fewshot = """Example (Performance, JSON only):
+{"Function":"position estimator","Metric":"RMSE","Threshold":"1.5","Unit":"m","Conditions":"steady hover","Measurement":"flight log analysis","VerificationMethod":"Analysis"}"""
+    elif req_type == "Constraint":
+        fewshot = """Example (Constraint, JSON only):
+{"Subject":"avionics enclosure","ConstraintText":"IP65 ingress protection","DriverOrStandard":"IEC 60529","Rationale":"dust and water resistance for field ops"}"""
+    else:
+        fewshot = """Example (Interface, JSON only):
+{"System":"flight computer","ExternalSystem":"ground control station","InterfaceStandard":"MAVLink v2","Direction":"Bi-directional","DataItems":"heartbeat, position, battery_status","Performance":"latency ≤ 150 ms","Conditions":"nominal flight modes"}"""
+
+    prompt = f"""
+You are assisting a systems engineer. Given this stakeholder need, produce a FIRST-DRAFT for a {req_type} requirement.
+
+NEED:
+\"\"\"{(need_text or '').strip()}\"\"\"\n
+Return ONLY a VALID JSON object with EXACTLY these keys (no extra text, no code fences):
+{json.dumps(fields)}
+
+Guidance:
+- Map scenario context into fields (e.g., contested airspace, stealth/avoiding detection, mission completion/return).
+- Keep Object as the thing acted on (do NOT include metrics or percentages in Object).
+- Put numbers/thresholds/units in Performance (or Threshold/Unit for Performance type).
+- Prefer an EARS style (use Trigger/Conditions when implied).
+- Avoid vague phrases: "all specified", "as soon as possible", "as needed", "etc.", "including but not limited to".
+- ModalVerb should usually be "shall".
+- VerificationMethod (if present): one of "Test","Analysis","Inspection","Demonstration".
+
+{fewshot}
+"""
+
+    try:
+        resp = model.generate_content(prompt)
+        raw = (getattr(resp, "text", "") or "").strip()
+    except Exception:
+        raw = ""
+
+    # Parse JSON strictly; fallback to Key: value lines
+    data = _extract_json_or_none(raw)
+    if data is None or not isinstance(data, dict):
+        data = _kv_lines_to_dict(raw)
+
+    # Build skeleton and copy values
+    out = {k: (data.get(k, "") if isinstance(data, dict) else "") for k in fields}
+
+    # --------- Light post-processing for quality ----------
+    def _ban_vague_phrases(txt: str) -> str:
+        banned = ["all specified", "as needed", "as soon as possible", "etc.", "including but not limited to"]
+        t = (txt or "")
+        for b in banned:
+            t = t.replace(b, "").strip()
+        return t
+
+    def _strip_perf_from_object(obj: str, perf: str) -> tuple[str, str]:
+        o = (obj or "").strip()
+        p = (perf or "").strip()
+        if not o:
+            return o, p
+        patterns = [
+            r'\bwith (a )?probability of\s*[0-9]*\.?[0-9]+%?',
+            r'\b(minimum|maximum|at least|no more than)\s*[0-9]*\.?[0-9]+%?\b',
+            r'\b\d+(\.\d+)?\s*(ms|s|sec|m|km|hz|khz|mhz|kbps|mbps|gbps|fps)\b',
+            r'\b\d+(\.\d+)?\s*%(\b|$)'
+        ]
+        extracted = []
+        for rx in patterns:
+            m = re.search(rx, o, flags=re.IGNORECASE)
+            if m:
+                extracted.append(m.group(0).strip())
+                o = (o[:m.start()] + o[m.end():]).strip().strip(',. ')
+        if extracted:
+            extra = " ".join(extracted)
+            if p:
+                if extra not in p:
+                    p = f"{p}; {extra}"
+            else:
+                p = extra
+        return o, p
+
+    need_lower = (need_text or "").lower()
+    def _maybe_push_context_to_conditions(conds: str) -> str:
+        bits = []
+        if "contested airspace" in need_lower and "contested airspace" not in (conds or "").lower():
+            bits.append("in contested airspace")
+        if "avoiding detection" in need_lower and "avoid" not in (conds or "").lower():
+            bits.append("while minimizing detectability by adversary sensors")
+        if "return" in need_lower and "return" not in (conds or "").lower():
+            bits.append("and return safely to base")
+        if bits:
+            return (f"{conds} " + " ".join(bits)).strip() if conds else " ".join(bits)
+        return conds
+
+    # Enums normalization
+    if "ModalVerb" in out:
+        mv = (out["ModalVerb"] or "shall").lower()
+        out["ModalVerb"] = mv if mv in ("shall","will","must") else "shall"
+    if "VerificationMethod" in out:
+        vm = (out["VerificationMethod"] or "").title()
+        out["VerificationMethod"] = vm if vm in ("Test","Analysis","Inspection","Demonstration") else "Test"
+    if "Direction" in out:
+        dr = (out["Direction"] or "")
+        out["Direction"] = dr if dr in ("In","Out","Bi-directional") else "Bi-directional"
+
+    # Apply quality polish by type
+    if req_type == "Functional":
+        out["Object"], out["Performance"] = _strip_perf_from_object(out.get("Object",""), out.get("Performance",""))
+        out["Object"] = _ban_vague_phrases(out.get("Object",""))
+        out["Conditions"] = _maybe_push_context_to_conditions(out.get("Conditions",""))
+    elif req_type == "Performance":
+        out["Function"] = _ban_vague_phrases(out.get("Function",""))
+    elif req_type == "Interface":
+        out["DataItems"] = _ban_vague_phrases(out.get("DataItems",""))
+    elif req_type == "Constraint":
+        out["ConstraintText"] = _ban_vague_phrases(out.get("ConstraintText",""))
+
+    return out
+
+
+def review_requirement_with_ai(api_key: str, requirement_text: str, preferred_verification: str | None = None) -> dict:
+    """
+    Return {"review": str, "acceptance": [str, ...]}.
+    JSON-first with graceful fallback if the model emits text.
+    """
+    pv = preferred_verification if preferred_verification in ("Test","Analysis","Inspection","Demonstration") else ""
+    hint = f' "preferredVerification": "{pv}",' if pv else ""
+
+    prompt = f"""
+Act as a systems engineering reviewer. Evaluate the requirement and propose precise, testable acceptance criteria.
+
+Return ONLY this JSON (no extra text, no code fences):
+{{
+  "review": "short critique focusing on ambiguity, measurability, singularity, feasibility",
+  {hint}
+  "acceptance": [
+    "bullet 1 with threshold(s), setup/conditions, verification method",
+    "bullet 2 ..."
+  ]
+}}
+
+Requirement:
+\"\"\"{(requirement_text or '').strip()}\"\"\"
+"""
+
+    raw = get_ai_suggestion(api_key, prompt)
+    data = _extract_json_or_none(raw)
+    if not isinstance(data, dict):
+        # fallback: wrap the raw text as a single acceptance block
+        return {"review": raw.strip(), "acceptance": []}
+
+    # shape and defaults
+    review = str(data.get("review", "")).strip()
+    acceptance = data.get("acceptance", [])
+    if not isinstance(acceptance, list):
+        acceptance = [str(acceptance)]
+    acceptance = [str(x).strip() for x in acceptance if str(x).strip()]
+    return {"review": review, "acceptance": acceptance}
