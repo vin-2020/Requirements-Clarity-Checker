@@ -33,6 +33,9 @@ An AI-assisted tool designed to help systems engineers and project managers impr
 
 Follow these instructions to get a copy of the project up and running on your local machine.
 
+**Note for New GitHub Users:** To use the `git clone` command, you must have **Git** installed on your computer. You can download it for free from [git-scm.com](https://git-scm.com/).
+
+
 #### **1. Prerequisites**
 
 * You must have **Python 3.9** or newer installed on your system.
