@@ -575,7 +575,6 @@ with tab_analyze:
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
-
     # --- NEW: toggle for AI parser (before uploader) ---
     use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
     if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
@@ -627,9 +626,6 @@ with tab_analyze:
     )
 
     # Build a queue of docs to process: (source_type, display_name, payload)
-    # - source_type == "upload"  -> payload is an UploadedFile
-    # - source_type == "example" -> payload is raw text
-    # - source_type == "stored"  -> payload is a filesystem path to a saved file
     docs_to_process = []
 
     if uploaded_files:
@@ -654,35 +650,60 @@ with tab_analyze:
         _fn, _path = stored_to_analyze
         docs_to_process.append(("stored", _fn, _path))
 
+    # ===================== NEW: Analyzer-local AI helpers =====================
+    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
+        """
+        Make a single, clear, unambiguous, testable, active-voice requirement using 'shall'.
+        Remove vagueness and passive voice; keep original intent.
+        Output: ONE sentence only (no bullets, no headers).
+        """
+        prompt = f"""
+You are a senior systems engineer. Rewrite the requirement below to be:
+- single sentence, active voice, using "shall"
+- unambiguous (no vague terms), testable (include precise conditions/thresholds if implied)
+- keep the original intent; do not add scope
+- no extra commentary; OUTPUT ONLY the rewritten sentence
+
+Requirement:
+\"\"\"{(req_text or '').strip()}\"\"\""""
+        out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if ln:
+                return ln
+        return out.strip()
+
+    def _ai_decompose_clean(api_key: str, req_text: str) -> str:
+        """
+        Decompose a (clean) requirement into singular children.
+        Output: numbered or dashed list (model default).
+        """
+        return decompose_requirement_with_ai(api_key, req_text) or ""
+    # ========================================================================
+
     if docs_to_process:
         with st.spinner("Processing and analyzing documents..."):
             saved_count = 0
-            all_export_rows = []  # NEW: collect all rows across documents for a combined CSV
+            all_export_rows = []
 
             for src_type, display_name, payload in docs_to_process:
                 # --- Extract requirements (AI or standard) ---
                 if src_type == "upload":
                     if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        # Read raw text for AI
                         if payload.name.endswith(".txt"):
                             raw = payload.getvalue().decode("utf-8", errors="ignore")
                             reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                            # ---- Fallback if AI found nothing (txt) ----
                             if not reqs and raw:
                                 reqs = extract_requirements_from_string(raw)
                         elif payload.name.endswith(".docx"):
-                            # Read paragraphs + tables
                             flat_text, table_rows = _read_docx_text_and_rows(payload)
-
-                            # Prefer deterministic table extraction if a requirements table exists
                             table_reqs = _extract_requirements_from_table_rows(table_rows)
                             if table_reqs:
                                 reqs = table_reqs
-                                raw = None  # not used
+                                raw = None
                             else:
                                 raw = flat_text
                                 reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                                # ---- Fallback if AI found nothing (docx, no table) ----
                                 if not reqs and raw:
                                     reqs = extract_requirements_from_string(raw)
                         else:
@@ -692,7 +713,6 @@ with tab_analyze:
                         reqs = extract_requirements_from_file(payload)
 
                 elif src_type == "stored":
-                    # payload is a filesystem path we previously saved
                     path = payload
                     if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
                         if path.endswith(".txt"):
@@ -709,7 +729,6 @@ with tab_analyze:
                         else:
                             reqs = []
                     else:
-                        # Standard parse without AI
                         if path.endswith(".txt"):
                             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                                 raw = f.read()
@@ -721,7 +740,6 @@ with tab_analyze:
                             reqs = []
 
                 else:
-                    # example text payload is already a string
                     if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
                         reqs = extract_requirements_with_ai(st.session_state.api_key, payload)
                     else:
@@ -732,7 +750,7 @@ with tab_analyze:
                     st.warning(f"⚠️ No recognizable requirements in **{display_name}**.")
                     continue
 
-                # --- Analyze requirements (re-using your checks) ---
+                # --- Analyze requirements ---
                 results = []
                 issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
 
@@ -763,17 +781,15 @@ with tab_analyze:
                         "singularity": singular,
                     })
 
-                # --- Scoring: simple percent clear ---
                 flagged_total = sum(
                     1 for r in results
                     if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
                 )
                 clarity_score = int(((total_reqs - flagged_total) / total_reqs) * 100) if total_reqs else 100
 
-                # --- Save to DB if helpers exist and a project is selected (only for new inputs) ---
+                # --- Save to DB if helpers exist and a project is selected (new inputs only) ---
                 if project_id is not None and src_type in ("upload", "example"):
                     try:
-                        # Prefer new helpers if available
                         if hasattr(db, "add_document") and hasattr(db, "add_requirements") and hasattr(db, "get_documents_for_project"):
                             existing = []
                             try:
@@ -785,7 +801,6 @@ with tab_analyze:
                             db.add_requirements(doc_id, reqs)
                             saved_count += 1
 
-                            # --- persist uploaded file (only for actual uploads) ---
                             if src_type == "upload":
                                 try:
                                     file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
@@ -802,13 +817,11 @@ with tab_analyze:
                                 except Exception as _e:
                                     st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
 
-                        # Fallback to legacy helpers
                         elif hasattr(db, "add_document_to_project") and hasattr(db, "add_requirements_to_document"):
                             doc_id = db.add_document_to_project(project_id, display_name, clarity_score)
                             db.add_requirements_to_document(doc_id, reqs)
                             saved_count += 1
 
-                            # --- persist uploaded file for legacy path as well ---
                             if src_type == "upload":
                                 try:
                                     file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
@@ -839,7 +852,7 @@ with tab_analyze:
                     c1.metric("Total Requirements", total_reqs)
                     c2.metric("Flagged", flagged_total)
                     c3.metric("Clarity Score", f"{clarity_score} / 100")
-                    st.progress(clarity_score)  # if your Streamlit expects 0..1, use clarity_score/100
+                    st.progress(clarity_score)
 
                     # --- Export CSV for this single document ---
                     export_rows = []
@@ -862,7 +875,6 @@ with tab_analyze:
                             "Issues Found": "; ".join(issues),
                         })
 
-                    # Download for this single document
                     df_doc = pd.DataFrame(export_rows)
                     csv_doc = df_doc.to_csv(index=False).encode("utf-8")
                     st.download_button(
@@ -873,8 +885,7 @@ with tab_analyze:
                         key=f"dl_csv_{display_name}",
                     )
 
-                    # Accumulate into "all documents" export
-                    all_export_rows.extend(export_rows)  # NEW
+                    all_export_rows.extend(export_rows)
 
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
@@ -915,34 +926,100 @@ with tab_analyze:
                                 if r["singularity"]:
                                     st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
 
-                                # Optional AI rewrite / decompose (uses your existing helper & API key)
-                                with st.expander("✨ Get AI Rewrite / Decomposition"):
-                                    if not st.session_state.api_key:
-                                        st.warning("Please enter your Google AI API Key.")
-                                    else:
-                                        # Buttons row: always show Rewrite; show Decompose only if singularity present
-                                        if r["singularity"]:
-                                            col1, col2 = st.columns(2)
+                                # ---------------- CONDITIONAL EXPANDER LOGIC ----------------
+                                # Count how many different issue categories are present
+                                issue_types_present = sum([
+                                    1 if r["ambiguous"] else 0,
+                                    1 if r["passive"] else 0,
+                                    1 if r["incomplete"] else 0,
+                                    1 if r["singularity"] else 0,
+                                ])
+
+                                if issue_types_present >= 2:
+                                    # Enhanced flow: Fix → Decompose
+                                    with st.expander("✨ AI Suggestions (Fix clarity first, then decompose)"):
+                                        if not st.session_state.api_key:
+                                            st.warning("Please enter your Google AI API Key.")
                                         else:
-                                            col1 = st.columns(1)[0]
+                                            issues_summary = []
+                                            if r["ambiguous"]:    issues_summary.append("Ambiguity")
+                                            if r["passive"]:      issues_summary.append("Passive Voice")
+                                            if r["incomplete"]:   issues_summary.append("Incompleteness")
+                                            if r["singularity"]:  issues_summary.append("Non-singular")
+                                            if issues_summary:
+                                                st.caption("Issues detected: " + ", ".join(issues_summary))
 
-                                        with col1:
-                                            if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
-                                                with st.spinner("AI is thinking..."):
-                                                    suggestion = get_ai_suggestion(st.session_state.api_key, r['text'])
-                                                st.info("AI Suggestion (Rewrite):")
-                                                st.markdown(f"> {suggestion}")
+                                            cache_key = f"rewritten_cache_{r['id']}"
+                                            if cache_key not in st.session_state:
+                                                st.session_state[cache_key] = ""
 
-                                        if r["singularity"]:
-                                            with col2:
-                                                if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
-                                                    with st.spinner("AI is decomposing..."):
-                                                        decomposed_reqs = decompose_requirement_with_ai(
-                                                            st.session_state.api_key,
-                                                            f"{r['id']} {r['text']}"
-                                                        )
-                                                    st.info("AI Suggestion (Decomposition):")
-                                                    st.markdown(decomposed_reqs)
+                                            btn_row = st.columns([1.3, 1.6, 1.6])
+                                            with btn_row[0]:
+                                                if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
+                                                    with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
+                                                        st.session_state[cache_key] = _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                    if st.session_state[cache_key]:
+                                                        st.success("Rewritten draft ready (see below).")
+                                                    else:
+                                                        st.info("No rewrite returned.")
+
+                                            with btn_row[1]:
+                                                if st.button(f"🧩 Decompose (After Fix) [{r['id']}]", key=f"decomp_after_fix_{r['id']}"):
+                                                    with st.spinner("Preparing clean text, then decomposing..."):
+                                                        base = st.session_state[cache_key].strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                        decomp = _ai_decompose_clean(st.session_state.api_key, base)
+                                                    if decomp.strip():
+                                                        st.info("Decomposition (based on cleaned requirement):")
+                                                        st.markdown(decomp)
+                                                    else:
+                                                        st.info("No decomposition returned.")
+
+                                            with btn_row[2]:
+                                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}"):
+                                                    with st.spinner("Rewriting, then decomposing..."):
+                                                        cleaned = st.session_state[cache_key].strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                        st.session_state[cache_key] = cleaned
+                                                        decomp = _ai_decompose_clean(st.session_state.api_key, cleaned)
+                                                    if cleaned:
+                                                        st.success("Rewritten requirement:")
+                                                        st.markdown(f"> {cleaned}")
+                                                    if decomp.strip():
+                                                        st.info("Decomposition:")
+                                                        st.markdown(decomp)
+
+                                            if st.session_state.get(cache_key, ""):
+                                                st.caption("Rewritten requirement (copy & use if desired):")
+                                                st.code(st.session_state[cache_key])
+
+                                else:
+                                    # Original lightweight tools
+                                    with st.expander("✨ Get AI Rewrite / Decomposition"):
+                                        if not st.session_state.api_key:
+                                            st.warning("Please enter your Google AI API Key.")
+                                        else:
+                                            if r["singularity"]:
+                                                col1, col2 = st.columns(2)
+                                            else:
+                                                col1 = st.columns(1)[0]
+
+                                            with col1:
+                                                if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
+                                                    with st.spinner("AI is thinking..."):
+                                                        suggestion = get_ai_suggestion(st.session_state.api_key, r['text'])
+                                                    st.info("AI Suggestion (Rewrite):")
+                                                    st.markdown(f"> {suggestion}")
+
+                                            if r["singularity"]:
+                                                with col2:
+                                                    if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
+                                                        with st.spinner("AI is decomposing..."):
+                                                            decomposed_reqs = decompose_requirement_with_ai(
+                                                                st.session_state.api_key,
+                                                                f"{r['id']} {r['text']}"
+                                                            )
+                                                        st.info("AI Suggestion (Decomposition):")
+                                                        st.markdown(decomposed_reqs)
+                                # -----------------------------------------------------------
                         else:
                             st.markdown(
                                 f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
@@ -958,7 +1035,6 @@ with tab_analyze:
     # Also clear the example selector so it doesn’t re-add an example on refresh
               st.session_state.pop("example_unified", None)
 
-
             # NEW: Combined CSV for all analyzed documents in this run
             if all_export_rows:
                 st.subheader("Download Combined Analysis")
@@ -971,7 +1047,8 @@ with tab_analyze:
                     mime="text/csv",
                     key="dl_csv_all_docs",
                 )
-                # --- Project library (document versions) ---
+
+# --- Project library (document versions) ---
 st.divider()
 st.header("Documents in this Project")
 
@@ -981,13 +1058,11 @@ else:
     pid = st.session_state.selected_project[0]
     try:
         if hasattr(db, "get_documents_for_project"):
-            rows = db.get_documents_for_project(pid)  # (doc_id, file_name, version, uploaded_at, clarity_score)
+            rows = db.get_documents_for_project(pid)
             if not rows:
                 st.info("No documents have been added to this project yet.")
             else:
-                # One row per version
                 doc_data = []
-
                 for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
                     doc_data.append({
                         "File Name": file_name,
@@ -995,11 +1070,9 @@ else:
                         "Uploaded On": uploaded_at.replace("T", " ")[:19] if isinstance(uploaded_at, str) else uploaded_at,
                         "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
                     })
-
                 df_docs = pd.DataFrame(doc_data).sort_values(["File Name","Version"], ascending=[True, False])
                 st.dataframe(df_docs, use_container_width=True)
 
-                # Export summary
                 proj_csv = df_docs.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     label="Download Project Documents Summary (CSV)",
@@ -1012,7 +1085,10 @@ else:
             st.info("get_documents_for_project() not found in db.database.")
     except Exception as e:
         st.error(f"Failed to load documents for this project: {e}")
-        
+
+
+
+
 
 # ------------------------------ Tab: Need Tutor (Simplified Editable Preview + Pro CSV) ------------------------------
 with tab_need:
@@ -1801,6 +1877,9 @@ NEED:
             mime="text/csv",
             key="pro_export_csv"
         )
+
+
+
 
 # ------------------------------ Tab: Chatbot ------------------------------
 with tab_chat:
