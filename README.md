@@ -2,7 +2,7 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-![ReqCheck Screenshot](https://github.com/user-attachments/assets/eed041d1-61fc-41a0-a128-90344673ea4d)
+<img width="1850" height="832" alt="image" src="https://github.com/user-attachments/assets/32f41833-3093-43d3-98e7-dadee3b9581a" />
 
 ---
 
@@ -31,22 +31,25 @@ An AI-assisted tool designed to help systems engineers and project managers impr
 
 ### 🤔 How ReqCheck Works: An Analogy
 
-`ReqCheck` is not a magic box that reads your mind. It's an expert assistant that forces you to ask the right questions before writing a final requirement.
+🚗 Sedan vs. Hatchback: Why Bad Requirements Break Projects
 
-**1. The Vague Stakeholder Need:**
-* A stakeholder says: *"I want something light and tasty for dinner."*
+A stakeholder says:
 
-**2. What `ReqCheck` Does:**
-* It immediately flags **"light"** and **"tasty"** as ambiguous terms.
-* It asks clarifying questions: Does "light" mean low-calorie, a small portion, or not greasy? How do you measure "tasty"—spice level, specific ingredients, style of cuisine?
-* It warns that the statement is **incomplete** because it lacks measurable acceptance criteria.
+“I need a comfortable sedan for daily commutes.”
 
-**3. The Result: A High-Quality Requirement:**
-* After the engineer is prompted to get clarification from the stakeholder, they can write a much stronger requirement:
-    > "The dinner **shall be** a vegetarian pizza with cheese, served hot within 20 minutes of ordering."
+The requirement engineer writes it down as:
 
-This shows the true value of `ReqCheck`: it doesn't invent the correct answer (the pizza). It **catches the bad words early**, forces the engineer to get the necessary clarification, and helps them transform a fuzzy need into a clear, testable, and verifiable requirement.
+“The vehicle shall have four wheels and transport people safely.”
 
+The design team builds… a hatchback.
+Because hey — it has four wheels and it’s safe, right?
+
+But the stakeholder didn’t want just “a car.” They wanted a sedan — comfort, space, and features that the vague requirement never captured.
+
+✅ How ReqCheck Helps
+ReqCheck doesn’t magically know what “sedan” means. But it catches the fuzzy, underspecified requirement early, flags missing details, and pushes you to clarify before the build team drives off in the wrong direction.
+
+That way, a sedan request actually results in a sedan — not an accidental hatchback. 🚘
 ---
 
 ### 🛠️ Getting Started
@@ -114,3 +117,8 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 ### 🙏 Acknowledgments
 * This project's structure and goals are aligned with principles from the **INCOSE Systems Engineering Handbook**.
+
+---
+
+### 📧 Contact
+For any questions, feedback, or collaboration inquiries, please feel free to reach out at: `reqcheck.dev@gmail.com`
