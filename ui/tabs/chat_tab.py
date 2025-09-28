@@ -1,13 +1,10 @@
 # ui/tabs/chat_tab.py
-import streamlit as st
+import re
 
 def render(st, db, rule_engine, CTX):
-    """
-    Requirements Chatbot tab.
-    Expects CTX['get_chatbot_response'] and CTX['get_ai_suggestion'] to be provided by app.py.
-    """
     get_chatbot_response = CTX["get_chatbot_response"]
     get_ai_suggestion = CTX["get_ai_suggestion"]
+    decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
 
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     st.header("Chat with an AI Systems Engineering Coach" + (f" — Project: {pname}" if pname else ""))
@@ -37,14 +34,7 @@ def render(st, db, rule_engine, CTX):
             help="Adds recent project requirements to ground the conversation"
         )
 
-    st.caption(
-        "Coach commands: "
-        "`/analyze <req>` (quality checks), "
-        "`/rewrite <req>` (show sample rewrite on demand), "
-        "`/ac <req> method=Test|Analysis|Inspection|Demonstration` (suggest AC), "
-        "`/decompose <req>` (break into singular items), "
-        "`/help`."
-    )
+   
 
     # --- render transcript
     for message in st.session_state.messages:
@@ -62,7 +52,6 @@ def render(st, db, rule_engine, CTX):
     )
 
     def _safe_project_context() -> str:
-        """Fetch a compact list of project requirements as context (best-effort)."""
         if not st.session_state.selected_project:
             return ""
         try:
@@ -91,10 +80,6 @@ def render(st, db, rule_engine, CTX):
             return ""
 
     def _to_gemini_history(messages: list[dict], system_prompt: str = "", project_ctx: str = "") -> list[dict]:
-        """
-        Convert UI chat history (roles: user/assistant) into Gemini-compatible history (roles: user/model).
-        Prepend system prompt & project context as a single 'user' message.
-        """
         hist = []
         preface_parts = []
         if system_prompt.strip():
@@ -103,7 +88,6 @@ def render(st, db, rule_engine, CTX):
             preface_parts.append(project_ctx.strip())
         if preface_parts:
             hist.append({"role": "user", "parts": ["\n\n".join(preface_parts)]})
-
         for m in messages:
             role = m.get("role", "user")
             content = m.get("content", "")
@@ -115,23 +99,12 @@ def render(st, db, rule_engine, CTX):
                 hist.append({"role": "model", "parts": [content]})
         return hist
 
-    # lightweight domain tools
-    from types import SimpleNamespace
-    tool = SimpleNamespace()
-
-    # Reuse analyzer helpers via CTX for /analyze
-    safe_call_ambiguity = CTX["safe_call_ambiguity"]
-    check_passive_voice = CTX["check_passive_voice"]
-    check_incompleteness = CTX["check_incompleteness"]
-    check_singularity = CTX["check_singularity"]
-    decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
-
     def _analyze(text: str) -> str:
-        amb = safe_call_ambiguity(text, rule_engine)
-        pas = check_passive_voice(text)
-        inc = check_incompleteness(text)
+        amb = CTX["safe_call_ambiguity"](text, rule_engine)
+        pas = CTX["check_passive_voice"](text)
+        inc = CTX["check_incompleteness"](text)
         try:
-            sing = check_singularity(text)
+            sing = CTX["check_singularity"](text)
         except Exception:
             sing = []
         issues = []
@@ -139,20 +112,16 @@ def render(st, db, rule_engine, CTX):
         if pas: issues.append(f"Passive: {', '.join(pas)}")
         if inc: issues.append("Incompleteness")
         if sing: issues.append(f"Multiple actions: {', '.join(sing)}")
-
         tips = []
         if amb: tips.append("Replace weak/vague terms with measurable thresholds.")
         if pas: tips.append("Switch to active voice with an explicit actor.")
         if inc: tips.append("Ensure a complete, testable statement with conditions and outcome.")
         if sing: tips.append("Split multiple actions into separate shall-statements.")
-
         out = "Analysis:\n- " + ("\n- ".join(issues) if issues else "No major issues found.")
-        if tips:
-            out += "\n\nCoach Tips:\n- " + "\n- ".join(tips)
+        if tips: out += "\n\nCoach Tips:\n- " + "\n- ".join(tips)
         return out
 
     def _rewrite_example(text: str) -> str:
-        """Return a single-sentence example rewrite (on explicit request)."""
         prompt = f"""
 You are a senior systems engineering COACH.
 Rewrite the requirement as ONE sentence using 'shall', active voice, unambiguous and testable.
@@ -161,7 +130,7 @@ Keep intent; do not add scope. Return ONLY the sentence.
 Requirement:
 \"\"\"{(text or '').strip()}\"\"\""""
         try:
-            suggestion = CTX["get_ai_suggestion"](st.session_state.api_key, prompt) or ""
+            suggestion = get_ai_suggestion(st.session_state.api_key, prompt) or ""
         except Exception as e:
             return f"(AI rewrite unavailable: {e})"
         for ln in suggestion.splitlines():
@@ -176,7 +145,7 @@ Requirement:
 \"\"\"{text.strip()}\"\"\" 
 Verification Method: {method or 'Test'}"""
         try:
-            return CTX["get_ai_suggestion"](st.session_state.api_key, prompt_ac)
+            return get_ai_suggestion(st.session_state.api_key, prompt_ac)
         except Exception as e:
             return f"(AI AC unavailable: {e})"
 
@@ -186,8 +155,8 @@ Verification Method: {method or 'Test'}"""
         except Exception as e:
             return f"(AI decomposition unavailable: {e})"
 
-    def _handle_slash(p: str):
-        p = p.strip()
+    def _handle_slash(prompt: str):
+        p = prompt.strip()
         if p == "/help":
             return (
                 "Commands:\n"
@@ -222,10 +191,8 @@ Verification Method: {method or 'Test'}"""
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # slash-commands first
             response = _handle_slash(prompt)
             if response is None:
-                # Coach-style free chat
                 project_ctx = _safe_project_context() if st.session_state.attach_ctx else ""
                 api_history = _to_gemini_history(st.session_state.messages, SE_SYSTEM_PROMPT, project_ctx)
                 with st.spinner("AI is thinking..."):
@@ -235,62 +202,8 @@ Verification Method: {method or 'Test'}"""
             with st.chat_message("assistant"):
                 st.markdown(response)
 
-            # Optional: button to get a sample rewrite for the LAST user message
-            if st.session_state.api_key:
-                if prompt and not prompt.startswith("/rewrite "):
-                    if st.button("Show example rewrite for my last message", key=f"coach_rewrite_btn_{len(st.session_state.messages)}"):
-                        example = _rewrite_example(prompt)
-                        st.info("Example rewrite (for consideration):")
-                        st.markdown(f"> {example}")
-
-    # --- sidebar quick chat
-    with st.sidebar:
-        st.markdown("---")
-        with st.expander("💬 Quick Chat ", expanded=False):
-            if "quick_chat_hist" not in st.session_state:
-                st.session_state.quick_chat_hist = []  # [{role, content}]
-            if "quick_chat_input" not in st.session_state:
-                st.session_state.quick_chat_input = ""
-
-            qc = st.text_area("Ask a quick question…", key="quick_chat_input", height=80, label_visibility="collapsed")
-
-            btn1, btn2 = st.columns([1, 1])
-            with btn1:
-                go = st.button("Send", key="quick_chat_send")
-            with btn2:
-                clear = st.button("Clear", key="quick_chat_clear")
-
-            if clear:
-                st.session_state.quick_chat_hist = []
-                st.session_state.quick_chat_input = ""
-                st.rerun()
-
-            if go and st.session_state.quick_chat_input.strip():
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API key to use the chat.")
-                else:
-                    user_msg = st.session_state.quick_chat_input.strip()
-                    st.session_state.quick_chat_hist.append({"role": "user", "content": user_msg})
-
-                    coach_prompt = (
-                        "You are an expert Systems Engineering coach (INCOSE/ISO 29148). "
-                        "Give concise guidance (critique + next steps). Do NOT write full requirements unless explicitly asked."
-                    )
-
-                    history = [{"role": "user", "parts": [coach_prompt]}]
-                    for m in st.session_state.quick_chat_hist:
-                        history.append({
-                            "role": "user" if m["role"] == "user" else "model",
-                            "parts": [m["content"]],
-                        })
-
-                    with st.spinner("Thinking…"):
-                        ans = get_chatbot_response(st.session_state.api_key, history)
-
-                    st.session_state.quick_chat_hist.append({"role": "assistant", "content": ans})
-                    st.session_state.quick_chat_input = ""
-                    st.rerun()
-
-            for m in st.session_state.quick_chat_hist[-6:]:
-                role_icon = "👤" if m["role"] == "user" else "🤖"
-                st.markdown(f"{role_icon} {m['content']}")
+            if st.session_state.api_key and prompt and not prompt.startswith("/rewrite "):
+                if st.button("Show example rewrite for my last message", key=f"coach_rewrite_btn_{len(st.session_state.messages)}"):
+                    example = _rewrite_example(prompt)
+                    st.info("Example rewrite (for consideration):")
+                    st.markdown(f"> {example}")
