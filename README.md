@@ -2,7 +2,7 @@
 
 An AI-assisted tool designed to help systems engineers and project managers improve the quality of their requirements. By identifying and flagging ambiguous language, passive voice, and incompleteness, this tool helps prevent costly rework and project delays. It uses NLP for analysis, an integrated LLM for intelligent assistance, and a project-based workspace to manage documents over time.
 
-<img width="2420" height="1293" alt="image" src="https://github.com/user-attachments/assets/eed041d1-61fc-41a0-a128-90344673ea4d" />
+![ReqCheck Screenshot](https://github.com/user-attachments/assets/eed041d1-61fc-41a0-a128-90344673ea4d)
 
 ---
 
@@ -24,21 +24,34 @@ An AI-assisted tool designed to help systems engineers and project managers impr
 #### AI-Powered Assistant Features
 * **🤖 Intelligent Requirement Extractor:** Uses an LLM to analyze unstructured documents and intelligently extract requirement statements, regardless of format.
 * **💡 AI Rewrite & Decompose Suggestions:** Uses the Google Gemini LLM to suggest clearer versions of flagged requirements or decompose complex requirements into multiple singular ones.
-* **✍️ Requirement Authoring Wizard:** A comprehensive environment to guide engineers from a high-level need to a complete, professional requirement.
-    * Features **AI-powered autofill** to parse a stakeholder need and pre-populate a structured requirement template.
-    * Includes live previews with an instant **quality checklist** based on INCOSE standards.
-    * Manages requirement **hierarchy and traceability**, allowing for the creation of parent-child relationships.
-    * Exports the final requirement set to a **professional CSV**, ready for import into other engineering tools like DOORS or Jama.
+* **✍️ Interactive Requirement Tutor:** A guided, form-based tool that teaches newcomers the correct structure of a high-quality requirement (Actor, Action, Object, Constraint) and uses AI to review the final result.
 * **💬 Requirements Chatbot:** An interactive AI assistant to discuss and refine requirements in real-time.
+
+---
+
+### 🤔 How ReqCheck Works: An Analogy
+
+`ReqCheck` is not a magic box that reads your mind. It's an expert assistant that forces you to ask the right questions before writing a final requirement.
+
+**1. The Vague Stakeholder Need:**
+* A stakeholder says: *"I want something light and tasty for dinner."*
+
+**2. What `ReqCheck` Does:**
+* It immediately flags **"light"** and **"tasty"** as ambiguous terms.
+* It asks clarifying questions: Does "light" mean low-calorie, a small portion, or not greasy? How do you measure "tasty"—spice level, specific ingredients, style of cuisine?
+* It warns that the statement is **incomplete** because it lacks measurable acceptance criteria.
+
+**3. The Result: A High-Quality Requirement:**
+* After the engineer is prompted to get clarification from the stakeholder, they can write a much stronger requirement:
+    > "The dinner **shall be** a vegetarian pizza with cheese, served hot within 20 minutes of ordering."
+
+This shows the true value of `ReqCheck`: it doesn't invent the correct answer (the pizza). It **catches the bad words early**, forces the engineer to get the necessary clarification, and helps them transform a fuzzy need into a clear, testable, and verifiable requirement.
 
 ---
 
 ### 🛠️ Getting Started
 
 Follow these instructions to get a copy of the project up and running on your local machine.
-
-**Note for New GitHub Users:** To use the `git clone` command, you must have **Git** installed on your computer. You can download it for free from [git-scm.com](https://git-scm.com/).
-
 
 #### **1. Prerequisites**
 
@@ -47,9 +60,11 @@ Follow these instructions to get a copy of the project up and running on your lo
 
 #### **2. Installation**
 
+**Note for New GitHub Users:** To use the `git clone` command, you must have **Git** installed on your computer. You can download it for free from [git-scm.com](https://git-scm.com/).
+
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/vin-2020/Requirements-Clarity-Checker.git
+    git clone [https://github.com/vin-2020/Requirements-Clarity-Checker.git](https://github.com/vin-2020/Requirements-Clarity-Checker.git)
     ```
 
 2.  **Navigate to the project directory:**
