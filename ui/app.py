@@ -9,12 +9,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import inspect
 import importlib
-import sqlite3  # <-- added to catch IntegrityError
+import sqlite3  # <-- to catch IntegrityError
 
 # Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # ------------------------- Imports from your app -------------------------
+# Analyzer functions (some may not exist in older versions; we shim below)
 from core.analyzer import (
     check_requirement_ambiguity,
     check_passive_voice,
@@ -39,33 +40,34 @@ except Exception:
             pass
 
 # LLM helpers (robust, reloadable)
-import importlib
 from llm import ai_suggestions as ai  # module import
+ai = importlib.reload(ai)  # ensure latest functions are picked up
 
-ai = importlib.reload(ai)  
-
-# Core helpers 
+# Core helpers (these should exist)
 get_ai_suggestion = getattr(ai, "get_ai_suggestion")
 generate_requirement_from_need = getattr(ai, "generate_requirement_from_need")
 
 # Optional helpers with safe fallbacks
 get_chatbot_response = getattr(
-    ai, "get_chatbot_response",
-    lambda api_key, history: get_ai_suggestion(api_key, "\n".join(
-        f"{m.get('role','user').upper()}: { (m.get('parts') or [m.get('content','')])[0] }"
-        for m in history
-    ) + "\nASSISTANT:")
+    ai,
+    "get_chatbot_response",
+    # Fallback: reuse get_ai_suggestion with a stitched history
+    lambda api_key, history: get_ai_suggestion(
+        api_key,
+        "\n".join(
+            f"{m.get('role','user').upper()}: {(m.get('parts') or [m.get('content','')])[0]}"
+            for m in history
+        ) + "\nASSISTANT:"
+    ),
 )
 
-# New decomposition helper 
+# New decomposition helper
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
     lambda api_key, requirement_text: "Decomposition helper failed to load."
 )
 
-
-
-# --- NEW (safe import for AI extractor) ---
+# --- Safe import for AI extractor ---
 try:
     from llm.ai_suggestions import extract_requirements_with_ai
     HAS_AI_PARSER = True
@@ -75,8 +77,8 @@ except Exception:
         return []  # fallback
 
 # Database helpers  (DB memory integration)
-from db.database import init_db, add_project, get_all_projects  
-from db import database as db  
+from db.database import init_db, add_project, get_all_projects  # type: ignore
+from db import database as db  # type: ignore  # <-- module import avoids name errors
 db = importlib.reload(db)  # ensure latest functions (add_document, etc.) are present
 
 # ========================= Helpers for Analyzer =========================
@@ -111,9 +113,8 @@ def _read_docx_text_and_rows(uploaded_file):
     flat_text = "\n".join(parts)
     return flat_text, rows
 
-# --- NEW: read .docx from disk path (for re-analysis of stored files) ---
+# --- read .docx from disk path (for re-analysis of stored files) ---
 def _read_docx_text_and_rows_from_path(path: str):
-    """Same as _read_docx_text_and_rows, but loads a .docx from a path on disk."""
     d = docx.Document(path)
     parts = []
     rows = []
@@ -193,7 +194,6 @@ def _extract_requirements_from_table_rows(table_rows):
 def extract_requirements_from_string(content: str):
     """Extract (id, text) pairs like 'SAT-REQ-001 ...' or '1.' lines."""
     requirements = []
-    # IDs like ABC-1, ABC-REQ-001, SUBSYS-THERM-42 or numbered "1."
     req_pattern = re.compile(r'^(([A-Z][A-Z0-9-]*-\d+)|(\d+\.))\s+(.*)$')
     for line in content.split('\n'):
         line = line.strip()
@@ -214,12 +214,9 @@ def extract_requirements_from_file(uploaded_file):
     else:
         content, table_rows = "", []
 
-    # Try table-aware extraction first (handles 'ID | Requirement | ...' tables)
     reqs = _extract_requirements_from_table_rows(table_rows)
     if reqs:
         return reqs
-
-    # Fallback to line regex on flattened text
     return extract_requirements_from_string(content)
 
 def format_requirement_with_highlights(req_id, req_text, issues):
@@ -263,10 +260,8 @@ def format_requirement_with_highlights(req_id, req_text, issues):
 def safe_call_ambiguity(text: str, engine: RuleEngine | None):
     """Call check_requirement_ambiguity with or without rule engine, depending on its signature."""
     try:
-        # Try (text, engine)
         return check_requirement_ambiguity(text, engine)
     except TypeError:
-        # Fallback to (text)
         return check_requirement_ambiguity(text)
 
 def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, engine: RuleEngine | None = None):
@@ -278,17 +273,15 @@ def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, 
     try:
         sig = inspect.signature(calculate_clarity_score)
         if len(sig.parameters) >= 3:
-            # New signature expects issue_counts + engine
             return calculate_clarity_score(total_reqs, issue_counts or {}, engine)
         else:
-            # Old signature: compute flagged_reqs
             flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
             return calculate_clarity_score(total_reqs, flagged_reqs)
     except Exception:
-        # Ultimate fallback: basic percent clear
         flagged_reqs = sum(1 for r in results if r['ambiguous'] or r['passive'] or r['incomplete'])
         clear_reqs = max(0, total_reqs - flagged_reqs)
         return int((clear_reqs / total_reqs) * 100) if total_reqs else 100
+
 def _open_db_conn():
     """
     Open a connection to the SAME SQLite DB the db module is using.
@@ -297,16 +290,14 @@ def _open_db_conn():
       - db.DB_PATH / DB_FILE / DB_NAME / DATABASE_PATH (string path)
       - common filenames next to db module: reqcheck.db, database.db, app.db
     """
-    # 1) Reuse existing connection if the module exposes it.
     if hasattr(db, "get_connection"):
         try:
             conn = db.get_connection()
             conn.execute("PRAGMA foreign_keys = ON;")
-            return conn, False  # do not close (owned by db module)
+            return conn, False
         except Exception:
             pass
 
-    # 2) Known path attributes on the module.
     for attr in ("DB_PATH", "DB_FILE", "DB_NAME", "DATABASE_PATH"):
         path = getattr(db, attr, None)
         if isinstance(path, str) and path:
@@ -314,7 +305,6 @@ def _open_db_conn():
             conn.execute("PRAGMA foreign_keys = ON;")
             return conn, True
 
-    # 3) Try common filenames in the db package directory.
     base_dir = os.path.dirname(db.__file__)
     for name in ("reqcheck.db", "database.db", "app.db"):
         candidate = os.path.join(base_dir, name)
@@ -328,7 +318,7 @@ def _open_db_conn():
         "Expose DB_PATH in db.database or provide db.get_connection()."
     )
 
-# --- NEW: File storage helpers (added exactly as requested) ---
+# --- File storage helpers ---
 def _sanitize_filename(name: str) -> str:
     return re.sub(r'[^A-Za-z0-9._-]+', '_', name)
 
@@ -347,7 +337,6 @@ def _save_uploaded_file_for_doc(project_id: int, doc_id: int, display_name: str,
     return out_path
 
 # =============================== UI Setup ===============================
-
 st.set_page_config(
     page_title="ReqCheck Workspace",
     page_icon="https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/Logo.png?raw=true",
@@ -395,6 +384,7 @@ if api_key_input:
 if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
 st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
+
 # One RuleEngine instance (real or stub)
 rule_engine = RuleEngine()
 
@@ -405,7 +395,6 @@ main_col, right_col = st.columns([4, 1], gap="large")
 with right_col:
     st.subheader("🗂️ Projects")
 
-    # Current selection info + clear
     if st.session_state.selected_project is not None:
         _pid, _pname = st.session_state.selected_project
         st.caption(f"Current: **{_pname}**")
@@ -413,13 +402,12 @@ with right_col:
             st.session_state.selected_project = None
             st.rerun()
 
-    # Load existing projects
     projects = get_all_projects()
     names = [p[1] for p in projects] if projects else []
     if names:
         sel_name = st.selectbox("Open project:", names, key="proj_select_right")
 
-        # --- Confirmation state (add these 3 keys once) ---
+        # Confirmation state
         if "confirm_delete" not in st.session_state:
             st.session_state.confirm_delete = False
         if "delete_project_id" not in st.session_state:
@@ -427,7 +415,6 @@ with right_col:
         if "delete_project_name" not in st.session_state:
             st.session_state.delete_project_name = None
 
-        # Load / Delete buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Load", key="btn_load_proj_right"):
@@ -439,14 +426,12 @@ with right_col:
 
         with col2:
             if st.button("Delete", key="btn_delete_proj_right"):
-                # Store selection and show confirmation UI on next rerun
                 for p in projects:
                     if p[1] == sel_name:
                         st.session_state.delete_project_id = p[0]
                         st.session_state.delete_project_name = sel_name
                         st.session_state.confirm_delete = True
 
-        # Render confirmation UI (persists across reruns)
         if st.session_state.confirm_delete:
             st.warning(
                 f"You're about to delete '{st.session_state.delete_project_name}'. "
@@ -455,7 +440,6 @@ with right_col:
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Confirm Delete", key="btn_confirm_delete_proj_right"):
-                    # === ROBUST RAW-SQL CASCADE DELETE (ONLY THIS BLOCK CHANGED) ===
                     pid_to_delete = st.session_state.delete_project_id
 
                     def _get_tables(conn):
@@ -464,9 +448,7 @@ with right_col:
                         return [r[0] for r in cur.fetchall()]
 
                     def _fk_refs(conn, ref_table_name):
-                        """
-                        Return list of (table, from_col) pairs for all tables that have a FK to ref_table_name.
-                        """
+                        """Return list of (table, from_col) pairs for all tables that have a FK to ref_table_name."""
                         refs = []
                         for t in _get_tables(conn):
                             try:
@@ -495,7 +477,7 @@ with right_col:
                                 qmarks = ",".join("?" for _ in doc_ids)
                                 cur.execute(f"DELETE FROM {tbl} WHERE {col} IN ({qmarks})", doc_ids)
 
-                            # 3) Now delete requirements explicitly, then documents  <<< CHANGED PART
+                            # 3) Now delete requirements explicitly, then documents
                             qmarks = ",".join("?" for _ in doc_ids)
                             try:
                                 cur.execute(f"DELETE FROM requirements WHERE document_id IN ({qmarks})", doc_ids)
@@ -517,7 +499,6 @@ with right_col:
                         st.success("Project deleted.")
 
                     except sqlite3.IntegrityError as e:
-                        # Extra diagnostics to show what blocked the delete
                         try:
                             cur.execute("PRAGMA foreign_key_check;")
                             problems = cur.fetchall()
@@ -556,7 +537,13 @@ with right_col:
         else:
             st.error("Please enter a project name.")
 
-# ------------------------------ Main Tabs ------------------------------
+# ------------------------------ Main Tabs (LEAN) ------------------------------
+# Import split tabs
+from ui.tabs.analyzer_tab import render as render_analyzer_tab
+from ui.tabs.needs_tab   import render as render_need_tab   # <-- plural
+from ui.tabs.chat_tab    import render as render_chat_tab
+
+
 with main_col:
     tab_analyze, tab_need, tab_chat = st.tabs([
         "📄 Document Analyzer",
@@ -564,1691 +551,39 @@ with main_col:
         "💬 Requirements Chatbot",
     ])
 
-# ------------------------------ Tab: Analyzer (Unified) ------------------------------
+# Build a lightweight context so tab files can reuse your helpers without duplication.
+CTX = {
+    # flags
+    "HAS_AI_PARSER": HAS_AI_PARSER,
+    # AI helpers
+    "get_ai_suggestion": get_ai_suggestion,
+    "get_chatbot_response": get_chatbot_response,   # <-- make chatbot available to the tab
+    "decompose_requirement_with_ai": decompose_requirement_with_ai,
+    "extract_requirements_with_ai": extract_requirements_with_ai,
+    # parsing/extract
+    "_read_docx_text_and_rows": _read_docx_text_and_rows,
+    "_read_docx_text_and_rows_from_path": _read_docx_text_and_rows_from_path,
+    "_extract_requirements_from_table_rows": _extract_requirements_from_table_rows,
+    "extract_requirements_from_string": extract_requirements_from_string,
+    "extract_requirements_from_file": extract_requirements_from_file,
+    # UI formatting
+    "format_requirement_with_highlights": format_requirement_with_highlights,
+    # analyzers
+    "safe_call_ambiguity": safe_call_ambiguity,
+    "check_passive_voice": check_passive_voice,
+    "check_incompleteness": check_incompleteness,
+    "check_singularity": check_singularity,
+    "safe_clarity_score": safe_clarity_score,
+    # storage
+    "_save_uploaded_file_for_doc": _save_uploaded_file_for_doc,
+    "_sanitize_filename": _sanitize_filename,
+}
+
 with tab_analyze:
-    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
-    if st.session_state.selected_project is None:
-        st.header("Analyze Documents & Text")
-        st.warning("You can analyze documents without a project, but results won’t be saved.")
-    else:
-        project_name = st.session_state.selected_project[1]
-        st.header(f"Analyze & Add Documents to: {project_name}")
+    render_analyzer_tab(st, db, rule_engine, CTX)
 
-    # ===== Quick Paste Analyzer — persist results so AI buttons work after rerun =====
-    st.subheader("🔍 Quick Paste Analyzer — single or small set")
-    quick_text = st.text_area(
-        "Paste one or more requirements (one per line). You may prefix with an ID like `REQ-001:`",
-        height=160,
-        key="quick_paste_area"
-    )
-    st.caption("Example:\nREQ-001: The system shall report position within 500 ms.\nREQ-001.1.")
-
-    # session keys for persistence
-    if "quick_results" not in st.session_state:
-        st.session_state.quick_results = []   # list of dicts with analysis
-    if "quick_issue_counts" not in st.session_state:
-        st.session_state.quick_issue_counts = {"Ambiguity":0,"Passive Voice":0,"Incompleteness":0,"Singularity":0}
-    if "quick_analyzed" not in st.session_state:
-        st.session_state.quick_analyzed = False
-    if "quick_text_snapshot" not in st.session_state:
-        st.session_state.quick_text_snapshot = ""
-
-    def _parse_quick_lines(raw: str):
-        rows = []
-        idx = 1
-        for ln in (raw or "").splitlines():
-            t = ln.strip()
-            if not t:
-                continue
-            if ":" in t:
-                left, right = t.split(":", 1)
-                rid = left.strip()
-                rtx = right.strip()
-                if not rtx:
-                    continue
-            else:
-                rid = f"R-{idx:03d}"
-                rtx = t
-            rows.append((rid, rtx))
-            idx += 1
-        return rows
-
-    # Local AI helpers
-    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
-        prompt = f"""
-You are a senior systems engineer. Rewrite the requirement below to be:
-- single sentence, active voice, using "shall"
-- unambiguous (no vague terms), testable (include precise conditions/thresholds if implied)
-- keep the original intent; do not add scope
-- no extra commentary; OUTPUT ONLY the rewritten sentence
-
-Requirement:
-\"\"\"{(req_text or '').strip()}\"\"\""""
-        out = get_ai_suggestion(api_key, prompt) or ""
-        for ln in out.splitlines():
-            ln = ln.strip()
-            if ln:
-                return ln
-        return out.strip()
-
-    def _ai_decompose_clean(api_key: str, req_text: str) -> str:
-        return decompose_requirement_with_ai(api_key, req_text) or ""
-
-    # Analyze button stores results in session so later AI button clicks don't lose state
-    if st.button("Analyze Pasted Lines", key="quick_analyze_btn"):
-        pairs = _parse_quick_lines(quick_text)
-        if not pairs:
-            st.warning("No non-empty lines found.")
-            st.session_state.quick_results = []
-            st.session_state.quick_issue_counts = {"Ambiguity":0,"Passive Voice":0,"Incompleteness":0,"Singularity":0}
-            st.session_state.quick_analyzed = False
-            st.session_state.quick_text_snapshot = ""
-        else:
-            issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
-            quick_results = []
-            for rid, rtx in pairs:
-                amb = safe_call_ambiguity(rtx, rule_engine)
-                pas = check_passive_voice(rtx)
-                inc = check_incompleteness(rtx)
-                try:
-                    sing = check_singularity(rtx)
-                except Exception:
-                    sing = []
-                if amb: issue_counts["Ambiguity"] += 1
-                if pas: issue_counts["Passive Voice"] += 1
-                if inc: issue_counts["Incompleteness"] += 1
-                if sing: issue_counts["Singularity"] += 1
-                quick_results.append({
-                    "id": rid, "text": rtx,
-                    "ambiguous": amb, "passive": pas, "incomplete": inc, "singularity": sing
-                })
-            # persist
-            st.session_state.quick_results = quick_results
-            st.session_state.quick_issue_counts = issue_counts
-            st.session_state.quick_analyzed = True
-            st.session_state.quick_text_snapshot = quick_text
-
-    # ---- Render quick results if we have them in session ----
-    if st.session_state.quick_analyzed and st.session_state.quick_results:
-        quick_results = st.session_state.quick_results
-        issue_counts = st.session_state.quick_issue_counts
-
-        total = len(quick_results)
-        flagged = sum(1 for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])
-        st.markdown(f"**Analyzed:** {total} • **Flagged:** {flagged}")
-        cqa = st.columns(4)
-        cqa[0].metric("Ambiguity", issue_counts["Ambiguity"])
-        cqa[1].metric("Passive", issue_counts["Passive Voice"])
-        cqa[2].metric("Incomplete", issue_counts["Incompleteness"])
-        cqa[3].metric("Multiple actions", issue_counts["Singularity"])
-
-        flagged_list = [r for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]]
-        clear_list   = [r for r in quick_results if not (r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])]
-
-        st.subheader("Flagged")
-        if not flagged_list:
-            st.caption("None 🎉")
-        for r in flagged_list:
-            with st.container():
-                st.markdown(
-                    format_requirement_with_highlights(r["id"], r["text"], r),
-                    unsafe_allow_html=True,
-                )
-
-                # Always offer AI Rewrite for flagged lines; persist output to CSV via cache key
-                col_rw, col_dc = st.columns(2)
-                with col_rw:
-                    if st.session_state.api_key and st.button(f"✨ AI Rewrite {r['id']}", key=f"quick_rew_{r['id']}"):
-                        try:
-                            # Provide targeted guidance based on detected issues
-                            hints = []
-                            if r["ambiguous"]: hints.append(f"remove ambiguity ({', '.join(r['ambiguous'])})")
-                            if r["passive"]:   hints.append("use active voice")
-                            if r["incomplete"]:hints.append("complete the sentence")
-                            guidance = "; ".join(hints) if hints else "ensure clarity, singularity, and testability"
-                            prompt = f"""Rewrite as ONE clear, singular, verifiable requirement using 'shall' in active voice; {guidance}.
-Original: \"\"\"{r['text']}\"\"\""""
-                            suggestion = get_ai_suggestion(st.session_state.api_key, prompt)
-                            st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
-                            st.info("AI Rewrite:")
-                            st.markdown(f"> {suggestion}")
-                        except Exception as e:
-                            st.warning(f"AI rewrite failed: {e}")
-
-                with col_dc:
-                    if st.session_state.api_key and r["singularity"] and st.button(f"🧩 Decompose {r['id']}", key=f"quick_dec_{r['id']}"):
-                        try:
-                            d = _ai_decompose_clean(st.session_state.api_key, f"{r['id']} {r['text']}")
-                            st.info("AI Decomposition:")
-                            st.markdown(d)
-                        except Exception as e:
-                            st.warning(f"AI decomposition failed: {e}")
-
-        st.subheader("Clear")
-        for r in clear_list:
-            st.markdown(
-                f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
-                f'border-radius:5px;margin-bottom:10px;">✅ <strong>{r["id"]}</strong> {r["text"]}</div>',
-                unsafe_allow_html=True,
-            )
-
-        # CSV export (includes any AI rewrites the user triggered)
-        exp_rows = []
-        for r in quick_results:
-            issues = []
-            if r["ambiguous"]: issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
-            if r["passive"]:   issues.append(f"Passive Voice: {', '.join(r['passive'])}")
-            if r["incomplete"]:issues.append("Incompleteness")
-            if r["singularity"]:issues.append(f"Singularity: {', '.join(r['singularity'])}")
-            ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
-            exp_rows.append({
-                "Requirement ID": r["id"],
-                "Requirement Text": r["text"],
-                "Status": "Clear" if not issues else "Flagged",
-                "Issues Found": "; ".join(issues),
-                "AI Rewrite (if generated)": ai_rew,
-            })
-        df_quick = pd.DataFrame(exp_rows)
-        st.download_button(
-            "Download Quick Analysis (CSV)",
-            data=df_quick.to_csv(index=False).encode("utf-8"),
-            file_name="ReqCheck_Quick_Analysis.csv",
-            mime="text/csv",
-            key="dl_quick_csv"
-        )
-
-    # ===================== Full Document Analyzer (unchanged logic) =====================
-    st.subheader("📁 Upload Documents — analyze one or more files")
-    use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
-    if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
-        st.info("AI Parser not available (missing function or API key). Falling back to Standard Parser.")
-
-    project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
-
-    stored_to_analyze = None
-    if project_id is not None and hasattr(db, "get_documents_for_project"):
-        try:
-            _rows = db.get_documents_for_project(project_id)
-            stored_docs, labels = [], []
-            for (doc_id, file_name, version, uploaded_at, clarity_score) in _rows:
-                conv_path = os.path.join("data", "projects", str(project_id), "documents",
-                                         f"{doc_id}_{_sanitize_filename(file_name)}")
-                if os.path.exists(conv_path):
-                    stored_docs.append((doc_id, file_name, version, conv_path))
-                    labels.append(f"{file_name} (v{version})")
-            if stored_docs:
-                sel = st.selectbox("Re-analyze a saved document:", ["— Select —"] + labels, key="rean_select")
-                if sel != "— Select —":
-                    if st.button("Analyze Selected", key="rean_btn"):
-                        idx = labels.index(sel)
-                        _doc_id, _fn, _ver, _path = stored_docs[idx]
-                        stored_to_analyze = (_fn, _path)
-        except Exception:
-            pass
-
-    uploaded_files = st.file_uploader(
-        "Upload one or more requirements documents (.txt or .docx)",
-        type=['txt', 'docx'],
-        accept_multiple_files=True,
-        key=f"uploader_unified_{project_id or 'none'}",
-    )
-
-    example_files = {"Choose an example...": None, "Drone System SRS (Complex Example)": "DRONE_SRS_v1.0.docx"}
-    selected_example = st.selectbox(
-        "Or, select an example to analyze:",
-        options=list(example_files.keys()),
-        key="example_unified",
-    )
-
-    docs_to_process = []
-    if uploaded_files:
-        for up in uploaded_files:
-            docs_to_process.append(("upload", up.name, up))
-    if selected_example != "Choose an example...":
-        example_path = example_files[selected_example]
-        try:
-            if example_path.endswith(".docx"):
-                d = docx.Document(example_path)
-                example_text = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
-            else:
-                with open(example_path, "r", encoding="utf-8") as f:
-                    example_text = f.read()
-            docs_to_process.append(("example", selected_example, example_text))
-        except FileNotFoundError:
-            st.error(f"Example file not found: {example_path}. Place it in the project folder.")
-    if stored_to_analyze:
-        _fn, _path = stored_to_analyze
-        docs_to_process.append(("stored", _fn, _path))
-
-    # (Document analysis + AI tools and CSV export remain the same as your last version)
-
-
-    # ===================== Analyzer-local AI helpers (shared) =====================
-    def _ai_rewrite_clarity_doc(api_key: str, req_text: str) -> str:
-        prompt = f"""
-You are a senior systems engineer. Rewrite the requirement below to be:
-- single sentence, active voice, using "shall"
-- unambiguous and testable
-- keep the original intent; no scope changes
-- OUTPUT ONLY the rewritten sentence
-Requirement:
-\"\"\"{(req_text or '').strip()}\"\"\""""
-        out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-        for ln in out.splitlines():
-            ln = ln.strip()
-            if ln:
-                return ln
-        return out.strip()
-
-    def _ai_decompose_clean_doc(api_key: str, req_text: str) -> str:
-        return decompose_requirement_with_ai(api_key, req_text) or ""
-    # ============================================================================
-
-    if docs_to_process:
-        with st.spinner("Processing and analyzing documents..."):
-            saved_count = 0
-            all_export_rows = []
-
-            for src_type, display_name, payload in docs_to_process:
-                # --- Extract requirements (AI or standard) ---
-                if src_type == "upload":
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        if payload.name.endswith(".txt"):
-                            raw = payload.getvalue().decode("utf-8", errors="ignore")
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                            if not reqs and raw:
-                                reqs = extract_requirements_from_string(raw)
-                        elif payload.name.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows(payload)
-                            table_reqs = _extract_requirements_from_table_rows(table_rows)
-                            if table_reqs:
-                                reqs = table_reqs
-                                raw = None
-                            else:
-                                raw = flat_text
-                                reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                                if not reqs and raw:
-                                    reqs = extract_requirements_from_string(raw)
-                        else:
-                            raw = ""
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                    else:
-                        reqs = extract_requirements_from_file(payload)
-
-                elif src_type == "stored":
-                    path = payload
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        if path.endswith(".txt"):
-                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                                raw = f.read()
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or extract_requirements_from_string(raw)
-                        elif path.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
-                            table_reqs = _extract_requirements_from_table_rows(table_rows)
-                            if table_reqs:
-                                reqs = table_reqs
-                            else:
-                                reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or extract_requirements_from_string(flat_text)
-                        else:
-                            reqs = []
-                    else:
-                        if path.endswith(".txt"):
-                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                                raw = f.read()
-                            reqs = extract_requirements_from_string(raw)
-                        elif path.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
-                            reqs = _extract_requirements_from_table_rows(table_rows) or extract_requirements_from_string(flat_text)
-                        else:
-                            reqs = []
-
-                else:
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        reqs = extract_requirements_with_ai(st.session_state.api_key, payload)
-                    else:
-                        reqs = extract_requirements_from_string(payload)
-
-                total_reqs = len(reqs)
-                if total_reqs == 0:
-                    st.warning(f"⚠️ No recognizable requirements in **{display_name}**.")
-                    continue
-
-                # --- Analyze requirements ---
-                results = []
-                issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
-
-                for rid, rtext in reqs:
-                    ambiguous = safe_call_ambiguity(rtext, rule_engine)
-                    passive = check_passive_voice(rtext)
-                    incomplete = check_incompleteness(rtext)
-                    try:
-                        singular = check_singularity(rtext)
-                    except Exception:
-                        singular = []
-
-                    if ambiguous:
-                        issue_counts["Ambiguity"] += 1
-                    if passive:
-                        issue_counts["Passive Voice"] += 1
-                    if incomplete:
-                        issue_counts["Incompleteness"] += 1
-                    if singular:
-                        issue_counts["Singularity"] += 1
-
-                    results.append({
-                        "id": rid,
-                        "text": rtext,
-                        "ambiguous": ambiguous,
-                        "passive": passive,
-                        "incomplete": incomplete,
-                        "singularity": singular,
-                    })
-
-                flagged_total = sum(
-                    1 for r in results
-                    if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
-                )
-                clarity_score = int(((total_reqs - flagged_total) / total_reqs) * 100) if total_reqs else 100
-
-                # --- Save to DB if helpers exist and a project is selected (new inputs only) ---
-                if project_id is not None and src_type in ("upload", "example"):
-                    try:
-                        if hasattr(db, "add_document") and hasattr(db, "add_requirements") and hasattr(db, "get_documents_for_project"):
-                            existing = []
-                            try:
-                                existing = [d for d in db.get_documents_for_project(project_id) if d[1] == display_name]
-                            except Exception:
-                                existing = []
-                            next_version = (max([d[2] for d in existing], default=0) + 1)
-                            doc_id = db.add_document(project_id, display_name, next_version, clarity_score)
-                            db.add_requirements(doc_id, reqs)
-                            saved_count += 1
-
-                            if src_type == "upload":
-                                try:
-                                    file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
-                                    if hasattr(db, "add_document_file"):
-                                        try:
-                                            db.add_document_file(doc_id, file_path)
-                                        except Exception:
-                                            pass
-                                    elif hasattr(db, "set_document_file_path"):
-                                        try:
-                                            db.set_document_file_path(doc_id, file_path)
-                                        except Exception:
-                                            pass
-                                except Exception as _e:
-                                    st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
-
-                        elif hasattr(db, "add_document_to_project") and hasattr(db, "add_requirements_to_document"):
-                            doc_id = db.add_document_to_project(project_id, display_name, clarity_score)
-                            db.add_requirements_to_document(doc_id, reqs)
-                            saved_count += 1
-
-                            if src_type == "upload":
-                                try:
-                                    file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
-                                    if hasattr(db, "add_document_file"):
-                                        try:
-                                            db.add_document_file(doc_id, file_path)
-                                        except Exception:
-                                            pass
-                                    elif hasattr(db, "set_document_file_path"):
-                                        try:
-                                            db.set_document_file_path(doc_id, file_path)
-                                        except Exception:
-                                            pass
-                                except Exception as _e:
-                                    st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
-                        else:
-                            st.info("Analysis done — DB helpers not found, so nothing was saved.")
-                    except Exception as e:
-                        st.warning(f"Saved analysis for **{display_name}**, but DB write failed: {e}")
-
-                # --- Per-document results UI ---
-                with st.expander(f"📄 {display_name} — Clarity {clarity_score}/100 • {total_reqs} requirements"):
-                    flagged_total = sum(
-                        1 for r in results
-                        if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
-                    )
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Requirements", total_reqs)
-                    c2.metric("Flagged", flagged_total)
-                    c3.metric("Clarity Score", f"{clarity_score} / 100")
-                    st.progress(clarity_score)
-
-                    # --- Export CSV for this single document (includes AI Rewrite) ---
-                    export_rows = []
-                    for r in results:
-                        issues = []
-                        if r["ambiguous"]:
-                            issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
-                        if r["passive"]:
-                            issues.append(f"Passive Voice: {', '.join(r['passive'])}")
-                        if r["incomplete"]:
-                            issues.append("Incompleteness")
-                        if r["singularity"]:
-                            issues.append(f"Singularity: {', '.join(r['singularity'])}")
-
-                        ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
-
-                        export_rows.append({
-                            "Document": display_name,
-                            "Requirement ID": r["id"],
-                            "Requirement Text": r["text"],
-                            "Status": "Clear" if not issues else "Flagged",
-                            "Issues Found": "; ".join(issues),
-                            "AI Rewrite (if generated)": ai_rew,
-                        })
-
-                    df_doc = pd.DataFrame(export_rows)
-                    csv_doc = df_doc.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label=f"Download '{display_name}' Analysis (CSV)",
-                        data=csv_doc,
-                        file_name=f"{os.path.splitext(display_name)[0]}_ReqCheck_Report.csv",
-                        mime="text/csv",
-                        key=f"dl_csv_{display_name}",
-                    )
-
-                    st.subheader("Issues by Type")
-                    st.bar_chart(issue_counts)
-
-                    # Word cloud of ambiguous terms
-                    all_ambiguous_words = []
-                    for r in results:
-                        if r["ambiguous"]:
-                            all_ambiguous_words.extend(r["ambiguous"])
-                    with st.expander("Common Weak Words (Word Cloud)"):
-                        if all_ambiguous_words:
-                            text_for_cloud = " ".join(all_ambiguous_words)
-                            wordcloud = WordCloud(
-                                width=800, height=300, background_color="white", collocations=False
-                            ).generate(text_for_cloud)
-                            fig, ax = plt.subplots()
-                            ax.imshow(wordcloud, interpolation="bilinear")
-                            ax.axis("off")
-                            st.pyplot(fig)
-                        else:
-                            st.write("No ambiguous words found.")
-
-                    st.subheader("Detailed Analysis")
-                    for r in results:
-                        is_flagged = r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
-                        if is_flagged:
-                            with st.container(border=True):
-                                st.markdown(
-                                    format_requirement_with_highlights(r["id"], r["text"], r),
-                                    unsafe_allow_html=True,
-                                )
-                                if r["ambiguous"]:
-                                    st.caption(f"ⓘ **Ambiguity:** {', '.join(r['ambiguous'])}")
-                                if r["passive"]:
-                                    st.caption(f"ⓘ **Passive Voice:** {', '.join(r['passive'])}")
-                                if r["incomplete"]:
-                                    st.caption("ⓘ **Incompleteness** detected.")
-                                if r["singularity"]:
-                                    st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
-
-                                # Count issue categories
-                                issue_types_present = sum([
-                                    1 if r["ambiguous"] else 0,
-                                    1 if r["passive"] else 0,
-                                    1 if r["incomplete"] else 0,
-                                    1 if r["singularity"] else 0,
-                                ])
-
-                                if issue_types_present >= 2:
-                                    # Enhanced flow: Fix → Decompose
-                                    with st.expander("✨ AI Suggestions (Fix clarity first, then decompose)"):
-                                        if not st.session_state.api_key:
-                                            st.warning("Please enter your Google AI API Key.")
-                                        else:
-                                            issues_summary = []
-                                            if r["ambiguous"]:    issues_summary.append("Ambiguity")
-                                            if r["passive"]:      issues_summary.append("Passive Voice")
-                                            if r["incomplete"]:   issues_summary.append("Incompleteness")
-                                            if r["singularity"]:  issues_summary.append("Non-singular")
-                                            if issues_summary:
-                                                st.caption("Issues detected: " + ", ".join(issues_summary))
-
-                                            cache_key = f"rewritten_cache_{r['id']}"
-                                            if cache_key not in st.session_state:
-                                                st.session_state[cache_key] = ""
-
-                                            btn_row = st.columns([1.3, 1.6, 1.6])
-                                            with btn_row[0]:
-                                                if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
-                                                    with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
-                                                        st.session_state[cache_key] = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                    if st.session_state[cache_key]:
-                                                        st.success("Rewritten draft ready (see below).")
-                                                    else:
-                                                        st.info("No rewrite returned.")
-
-                                            with btn_row[1]:
-                                                if st.button(f"🧩 Decompose (After Fix) [{r['id']}]", key=f"decomp_after_fix_{r['id']}"):
-                                                    with st.spinner("Preparing clean text, then decomposing..."):
-                                                        base = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, base)
-                                                    if decomp.strip():
-                                                        st.info("Decomposition (based on cleaned requirement):")
-                                                        st.markdown(decomp)
-                                                    else:
-                                                        st.info("No decomposition returned.")
-
-                                            with btn_row[2]:
-                                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}]"):
-                                                    with st.spinner("Rewriting, then decomposing..."):
-                                                        cleaned = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                        st.session_state[cache_key] = cleaned
-                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, cleaned)
-                                                    if cleaned:
-                                                        st.success("Rewritten requirement:")
-                                                        st.markdown(f"> {cleaned}")
-                                                    if decomp.strip():
-                                                        st.info("Decomposition:")
-                                                        st.markdown(decomp)
-
-                                            if st.session_state.get(cache_key, ""):
-                                                st.caption("Rewritten requirement (this will appear in CSV):")
-                                                st.code(st.session_state[cache_key])
-
-                                else:
-                                    # Lightweight tools
-                                    with st.expander("✨ Get AI Rewrite / Decomposition"):
-                                        if not st.session_state.api_key:
-                                            st.warning("Please enter your Google AI API Key.")
-                                        else:
-                                            if r["singularity"]:
-                                                col1, col2 = st.columns(2)
-                                            else:
-                                                col1 = st.columns(1)[0]
-
-                                            with col1:
-                                                if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
-                                                    with st.spinner("AI is thinking..."):
-                                                        suggestion = _ai_rewrite_clarity_doc(st.session_state.api_key, r['text'])
-                                                    # Store rewrite so it appears in CSV
-                                                    st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
-                                                    st.info("AI Suggestion (Rewrite):")
-                                                    st.markdown(f"> {suggestion}")
-
-                                            if r["singularity"]:
-                                                with col2:
-                                                    if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
-                                                        with st.spinner("AI is decomposing..."):
-                                                            decomposed_reqs = _ai_decompose_clean_doc(
-                                                                st.session_state.api_key,
-                                                                f"{r['id']} {r['text']}"
-                                                            )
-                                                        st.info("AI Suggestion (Decomposition):")
-                                                        st.markdown(decomposed_reqs)
-                        else:
-                            st.markdown(
-                                f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
-                                f'border-radius:5px;margin-bottom:10px;">✅ <strong>{r["id"]}</strong> {r["text"]}</div>',
-                                unsafe_allow_html=True,
-                            )
-
-            if saved_count:
-                st.success(f"Successfully saved {saved_count} document(s) to the project.")
-                # Clear uploader state so files aren’t reprocessed
-                uploader_key = f"uploader_unified_{project_id or 'none'}"
-                st.session_state.pop(uploader_key, None)
-                # Also clear the example selector so it doesn’t re-add an example on refresh
-                st.session_state.pop("example_unified", None)
-
-# --- Project library (document versions) ---
-st.divider()
-st.header("Documents in this Project")
-
-if st.session_state.selected_project is None:
-    st.info("Select a project to view its saved documents.")
-else:
-    pid = st.session_state.selected_project[0]
-    try:
-        if hasattr(db, "get_documents_for_project"):
-            rows = db.get_documents_for_project(pid)  # (doc_id, file_name, version, uploaded_at, clarity_score)
-            if not rows:
-                st.info("No documents have been added to this project yet.")
-            else:
-                # One row per version
-                doc_data = []
-                for (doc_id, file_name, version, uploaded_at, clarity_score) in rows:
-                    doc_data.append({
-                        "File Name": file_name,
-                        "Version": version,
-                        "Uploaded On": uploaded_at.replace("T", " ")[:19] if isinstance(uploaded_at, str) else uploaded_at,
-                        "Clarity Score": f"{clarity_score} / 100" if clarity_score is not None else "—",
-                    })
-                df_docs = pd.DataFrame(doc_data).sort_values(["File Name","Version"], ascending=[True, False])
-                st.dataframe(df_docs, use_container_width=True)
-
-                # Export summary
-                proj_csv = df_docs.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Project Documents Summary (CSV)",
-                    data=proj_csv,
-                    file_name=f"Project_{pid}_Documents_Summary.csv",
-                    mime="text/csv",
-                    key="dl_csv_project_docs",
-                )
-        else:
-            st.info("get_documents_for_project() not found in db.database.")
-    except Exception as e:
-        st.error(f"Failed to load documents for this project: {e}")
-
-
-
-# ------------------------------ Tab: Need Tutor (Simplified Editable Preview + Pro CSV) ------------------------------
 with tab_need:
-    import re, json
-    import pandas as pd
-    import streamlit as st
-    import streamlit.components.v1 as components
+    render_need_tab(st, db, rule_engine, CTX)
 
-    # ---------- SAFE analyzer imports (unchanged behavior) ----------
-    try:
-        from core.rules import RuleEngine as _RealRuleEngine
-    except Exception:
-        _RealRuleEngine = None
-
-    class _FallbackRuleEngine:
-        def is_check_enabled(self, name: str) -> bool: return True
-        def get_ambiguity_terms(self): return []
-        def get_custom_weak_words(self): return []
-        def get_ambiguity_words(self): return []
-        def get_weak_words(self): return []
-
-    def _get_rule_engine():
-        try:
-            return _RealRuleEngine() if _RealRuleEngine is not None else _FallbackRuleEngine()
-        except Exception:
-            return _FallbackRuleEngine()
-
-    try:
-        from core.analyzer import check_requirement_ambiguity, check_passive_voice, check_incompleteness
-        try:
-            from core.analyzer import check_singularity as _chk_sing
-        except Exception:
-            def _chk_sing(_): return []
-    except Exception:
-        def check_requirement_ambiguity(_t, _re=None): return []
-        def check_passive_voice(_t): return []
-        def check_incompleteness(_t): return []
-        def _chk_sing(_): return []
-
-    # ---------- AI helpers (keep as-is) ----------
-    try:
-        from llm.ai_suggestions import analyze_need_autofill as _strict_autofill
-    except Exception:
-        _strict_autofill = None
-    try:
-        from llm.ai_suggestions import get_ai_suggestion, decompose_requirement_with_ai
-    except Exception:
-        def get_ai_suggestion(*args, **kwargs): return ""
-        def decompose_requirement_with_ai(*args, **kwargs): return ""
-
-    # ---------- State ----------
-    def _init_state():
-        if "need_ui" not in st.session_state:
-            st.session_state.need_ui = {
-                # top
-                "mode":"Detailed",
-                "req_type":"Functional",
-                "stakeholder":"", "priority":"Should", "lifecycle":"Operations",
-                # content
-                "need_text":"", "rationale":"",
-                # structured fields (for Detailed)
-                "Functional":{"actor":"", "modal":"shall", "action":"", "object":"", "trigger":"", "conditions":"", "performance":""},
-                "Performance":{"function":"", "metric":"", "threshold":"", "unit":"", "conditions":"", "measurement":"", "verification":"Test"},
-                "Constraint":{"subject":"", "constraint_text":"", "driver":"", "why":""},
-                "Interface":{"system":"", "external":"", "standard":"", "direction":"Bi-directional", "data":"", "perf":"", "conditions":""},
-                # previews/output
-                "preview_req":"",          # now the ONLY editable preview surface
-                "final_req":"",            # explicit final requirement (user-loaded)
-                "final_ac":[],             # acceptance criteria (editable)
-                "last_ai_raw":"",          # latest AI raw (review/decompose)
-                # IDs & role (simple)
-                "final_role":"Parent",     # "Parent" or "Child"
-                "final_id":"",             # ID for the Final Requirement
-                "final_parent_id":"",      # only if final is a child
-                "child_next":1,            # next child integer suffix for quick generate
-                # Decomposition
-                "decomp_source":"Need",    # "Need" or "Final Requirement"
-                "decomp_parent_text":"",   # parent text used in decomposition section (editable)
-                "decomp_parent_id":"",     # parent id used in decomposition section (editable)
-                "decomp_rows":[],          # list of {"ID","ParentID","Requirement Text"}
-                "scroll_to":""
-            }
-    _init_state()
-    S = st.session_state.need_ui
-
-    # ---------- Header ----------
-    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
-    st.header("✍️ Need → Requirement Assistant" + (f" — Project: {pname}" if pname else ""))
-
-    # ---------- Top controls ----------
-    c_top = st.columns([1,1,1,1,1])
-    with c_top[0]:
-        S["mode"] = st.radio("Mode", ["Simple","Detailed"], index=["Simple","Detailed"].index(S["mode"]),
-                             horizontal=True, key="need_mode_top")
-    with c_top[1]:
-        S["req_type"] = st.selectbox("Requirement Type",
-            ["Functional","Performance","Constraint","Interface"],
-            index=["Functional","Performance","Constraint","Interface"].index(S["req_type"]),
-            key="need_reqtype_top")
-    with c_top[2]:
-        S["priority"] = st.selectbox("Priority", ["Must","Should","Could","Won't (now)"],
-                                     index=["Must","Should","Could","Won't (now)"].index(S["priority"]),
-                                     key="need_priority_top")
-    with c_top[3]:
-        S["lifecycle"] = st.selectbox("Life-cycle", ["Concept","Development","P/I/V&V","Operations","Maintenance","Disposal"],
-                                      index=["Concept","Development","P/I/V&V","Operations","Maintenance","Disposal"].index(S["lifecycle"]),
-                                      key="need_lifecycle_top")
-    with c_top[4]:
-        S["stakeholder"] = st.text_input("Stakeholder / Role", value=S["stakeholder"],
-                                         placeholder="e.g., Field operator, Acquirer", key="need_stakeholder_top")
-
-    # ---------- Need & Rationale ----------
-    st.subheader("Stakeholder Need")
-    S["need_text"] = st.text_area("Describe the need (no 'shall')", value=S["need_text"], height=110,
-                                  placeholder="e.g., The operator needs the drone to warn about low battery to avoid mission aborts.",
-                                  key="need_text_area")
-    S["rationale"] = st.text_area("Rationale (why this matters)", value=S["rationale"], height=80,
-                                  placeholder="e.g., Prevent mission failure and avoid emergency landings.",
-                                  key="need_rat_area")
-
-    # ---------- Helpers (formatting only; analyzer unchanged) ----------
-    _VAGUE = ("all specified","as needed","as soon as possible","etc.","including but not limited to")
-    def _strip_vague(t: str) -> str:
-        x = (t or "")
-        for b in _VAGUE: x = x.replace(b, "")
-        return re.sub(r"\s{2,}", " ", x).strip(" ,.")
-
-    def _strip_perf_from_object(obj: str, perf: str) -> tuple[str,str]:
-        o = (obj or "").strip(); p = (perf or "").strip()
-        if not o: return o, p
-        rxes = [
-            r'\bwith (a )?probability of\s*[0-9]*\.?[0-9]+%?',
-            r'\b(minimum|maximum|at least|no more than)\s*[0-9]*\.?[0-9]+%?\b',
-            r'\b\d+(\.\d+)?\s*(ms|s|sec|m|km|Hz|kHz|MHz|kbps|Mbps|Gbps|fps)\b',
-            r'\b\d+(\.\d+)?\s*%(\b|$)'
-        ]
-        extracted = []
-        for rx in rxes:
-            m = re.search(rx, o, flags=re.I)
-            if m:
-                extracted.append(m.group(0))
-                o = (o[:m.start()] + o[m.end():]).strip(" ,.")
-        if extracted:
-            extra = " ".join(extracted)
-            if p and extra not in p: p = f"{p}; {extra}"
-            if not p: p = extra
-        return o, p
-
-    def _push_need_context_to_conditions(conds: str, need_text: str) -> str:
-        base = (conds or "")
-        nl = (need_text or "").lower()
-        bits = []
-        if "contested airspace" in nl and "contested airspace" not in base.lower():
-            bits.append("in contested airspace")
-        if ("avoid" in nl or "avoiding detection" in nl or "stealth" in nl) and not re.search(r"detect|avoid", base, flags=re.I):
-            bits.append("while minimizing detectability by adversary sensors")
-        if "return" in nl and "return" not in base.lower():
-            bits.append("and return safely to base")
-        if bits:
-            base = (base + " " + " ".join(bits)).strip()
-        return re.sub(r"\s{2,}", " ", base)
-
-    def _normalize_trigger(trig: str) -> str:
-        t = (trig or "").strip(" ,.")
-        if not t: return ""
-        t = re.sub(r'^\s*when\s+when\s+', 'when ', t, flags=re.I)
-        if not re.match(r'^(when|if|while|during)\b', t, flags=re.I):
-            t = "when " + t
-        return t
-
-    # ---------- Previews ----------
-    def _need_preview():
-        raw_need = (S["need_text"] or "").strip()
-        if raw_need.lower().startswith(("the ","a ","an ","i ","we ","user ","operator ","stakeholder ","mission")):
-            text = raw_need
-        else:
-            text = f"The {S['stakeholder'] or 'stakeholder'} needs the system to {raw_need or '[describe need]'}"
-        text += f" so that {S['rationale'].strip()}." if S["rationale"].strip() else "."
-        return text
-
-    def _build_req_preview():
-        t = S["req_type"]
-        if t == "Functional":
-            f = S["Functional"]
-            actor = (f["actor"] or "[Actor]").strip()
-            modal = (f["modal"] or "shall").strip()
-            action = (f["action"] or "[action]").strip()
-            obj = (f["object"] or "[object]").strip()
-            trig = _normalize_trigger(f["trigger"])
-            cond = _strip_vague(f["conditions"])
-            perf = _strip_vague(f["performance"])
-            prefix = (trig + ", ") if trig else ""
-            tail_perf = f" {perf}" if perf and perf.lower() not in obj.lower() else ""
-            tail_cond = f" {cond}" if cond else ""
-            snt = f"{prefix}{actor} {modal} {action} {obj}{tail_perf}{tail_cond}"
-            snt = re.sub(r"\s{2,}", " ", snt).strip()
-            if not snt.endswith("."): snt += "."
-            return snt
-        if t == "Performance":
-            p = S["Performance"]
-            seg_cond = f" under {p['conditions']}" if p["conditions"] else ""
-            seg_meas = f" as measured by {p['measurement']}" if p["measurement"] else ""
-            return f"The {p['function'] or '[function]'} shall have {p['metric'] or '[metric]'} {p['threshold'] or '[value]'} {p['unit'] or '[unit]'}{seg_cond}{seg_meas}."
-        if t == "Constraint":
-            c = S["Constraint"]
-            seg = f" per {c['driver']}" if c["driver"] else ""
-            return f"The {c['subject'] or '[subject]'} shall comply with {c['constraint_text'] or '[constraint]'}{seg}."
-        if t == "Interface":
-            i = S["Interface"]
-            seg_perf = f" with {i['perf']}" if i["perf"] else ""
-            seg_cond = f" under {i['conditions']}" if i["conditions"] else ""
-            return f"The {i['system'] or '[system]'} shall interface with {i['external'] or '[external system]'} via {i['standard'] or '[standard]'} ({i['direction']}). It shall exchange {i['data'] or '[data]'}{seg_perf}{seg_cond}."
-        return ""
-
-    # Initialize preview once if empty (avoid overwriting user edits each render)
-    if not S.get("preview_req"):
-        S["preview_req"] = _build_req_preview()
-
-    # ---------- SIMPLE MODE ACTION ROW ----------
-    if S["mode"] == "Simple":
-        row = st.columns([1.2, 1.2, 1.1, 1.1, 1.0])
-        with row[0]:
-            if st.button("🚀 Generate Requirement"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need.")
-                else:
-                    prompt = f"""
-You are a systems engineer. Convert the NEED into ONE clear, testable {S['req_type']} requirement (use 'shall') and 3–6 acceptance criteria.
-
-NEED:
-\"\"\"{S['need_text'].strip()}\"\"\"\n
-RATIONALE:
-\"\"\"{S['rationale'].strip()}\"\"\"\n
-Return STRICTLY:
-
-REQUIREMENT: <one sentence, active voice, measurable where applicable>
-
-ACCEPTANCE CRITERIA:
-- <criterion 1 with setup/conditions + threshold + verification method>
-- <criterion 2>
-- <criterion 3>
-"""
-                    raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    S["last_ai_raw"] = raw
-                    req = ""
-                    m = re.search(r'(?im)^\s*REQUIREMENT\s*:\s*(.+)$', raw)
-                    if m: req = m.group(1).strip()
-                    if not req:
-                        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-                        req = next((ln for ln in lines if re.search(r'\bshall\b', ln, re.I)), "")
-                    if req:
-                        S["preview_req"] = req
-
-                    ac = []
-                    ac_block = raw.split("ACCEPTANCE CRITERIA", 1)[-1] if "ACCEPTANCE CRITERIA" in raw else ""
-                    for ln in (ac_block or "").splitlines():
-                        if re.match(r'^\s*[-*•]\s+', ln):
-                            ac.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                    S["final_ac"] = ac
-                    st.success("Requirement generated. Review below.")
-        with row[1]:
-            if st.button("🪄 Improve Requirement"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["preview_req"].strip():
-                    st.error("Generate a requirement first.")
-                else:
-                    base = S["preview_req"].strip()
-                    prompt = f"""Rewrite this as a single, clear, unambiguous, testable sentence in active voice using 'shall'. Return only the sentence.
-
-\"\"\"{base}\"\"\""""
-                    out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    if out.strip():
-                        S["preview_req"] = out.strip().splitlines()[0]
-                        st.success("Requirement refined.")
-        with row[2]:
-            if st.button("🤖 Review & Generate AC"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["preview_req"].strip():
-                    st.error("Enter or generate a requirement first.")
-                else:
-                    prompt = f"""
-Act as a systems engineering reviewer. Provide a short critique and 3–6 testable acceptance criteria (each includes setup/conditions, threshold(s), and verification: Test/Analysis/Inspection/Demonstration).
-
-REQUIREMENT:
-\"\"\"{S['preview_req'].strip()}\"\"\""""
-                    raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    S["last_ai_raw"] = raw
-                    bullets = []
-                    for ln in raw.splitlines():
-                        if re.match(r'^\s*[-*•]\s+', ln):
-                            bullets.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                    if bullets:
-                        S["final_ac"] = bullets
-                        st.success("Acceptance Criteria generated.")
-        with row[3]:
-            if st.button("🧩 Decompose"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                else:
-                    src = S.get("decomp_source","Need")
-                    base = S["need_text"].strip() if src == "Need" else S["preview_req"].strip()
-                    if not base:
-                        st.error(f"Enter a {src.lower()} to decompose.")
-                    else:
-                        S["last_ai_raw"] = decompose_requirement_with_ai(st.session_state.api_key, base) or ""
-                        rows, idx = [], 1
-                        for ln in (S["last_ai_raw"] or "").splitlines():
-                            if re.match(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', ln):
-                                txt = re.sub(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', '', ln).strip()
-                                if txt:
-                                    parent = S.get("final_id","").strip() or S.get("final_parent_id","").strip()
-                                    cid = f"{(parent or 'REQ-000')}.{idx}"
-                                    rows.append({"ID": cid, "ParentID": parent, "Requirement Text": txt})
-                                    idx += 1
-                        S["decomp_rows"] = rows
-                        S["decomp_parent_text"] = S["preview_req"].strip() if src == "Final Requirement" else ""
-                        S["decomp_parent_id"] = S.get("final_id","").strip()
-                        S["scroll_to"] = "decomp"
-                        st.rerun()
-        with row[4]:
-            if st.button("↺ Reset"):
-                _init_state()
-                st.rerun()
-
-    # ---------- DETAILED MODE (Analyze Autofill + fields) ----------
-    if S["mode"] == "Detailed":
-        st.caption("Use **Analyze Need (AI Autofill)** to seed fields; then refine and preview.")
-        c_an = st.columns([1,1,2])
-        with c_an[0]:
-            if st.button("🔎 Analyze Need (AI Autofill)"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need first.")
-                elif not _strict_autofill:
-                    st.info("Autofill helper not available; fill fields manually.")
-                else:
-                    with st.spinner("Analyzing need..."):
-                        kv = _strict_autofill(st.session_state.api_key, S["need_text"], S["req_type"]) or {}
-                    if S["req_type"] == "Functional":
-                        actor = _strip_vague(kv.get("Actor","")) or "The system"
-                        modal = (kv.get("ModalVerb","shall") or "shall").lower()
-                        action = _strip_vague(kv.get("Action",""))
-                        obj, perf = _strip_perf_from_object(_strip_vague(kv.get("Object","")), _strip_vague(kv.get("Performance","")))
-                        trig = _normalize_trigger(_strip_vague(kv.get("Trigger","")))
-                        cond = _push_need_context_to_conditions(_strip_vague(kv.get("Conditions","")), S["need_text"])
-                        S["Functional"].update({"actor":actor,"modal": modal if modal in ("shall","will","must") else "shall",
-                                                "action":action,"object":obj,"trigger":trig,"conditions":cond,"performance":perf})
-                    elif S["req_type"] == "Performance":
-                        S["Performance"].update({
-                            "function":_strip_vague(kv.get("Function","")),
-                            "metric":_strip_vague(kv.get("Metric","")),
-                            "threshold":_strip_vague(kv.get("Threshold","")),
-                            "unit":_strip_vague(kv.get("Unit","")),
-                            "conditions":_strip_vague(kv.get("Conditions","")),
-                            "measurement":_strip_vague(kv.get("Measurement","")),
-                            "verification": kv.get("VerificationMethod","Test") if kv.get("VerificationMethod") in ("Test","Analysis","Inspection","Demonstration") else "Test"
-                        })
-                    elif S["req_type"] == "Constraint":
-                        S["Constraint"].update({
-                            "subject":_strip_vague(kv.get("Subject","")),
-                            "constraint_text":_strip_vague(kv.get("ConstraintText","")),
-                            "driver":_strip_vague(kv.get("DriverOrStandard","")),
-                            "why": _strip_vague(kv.get("Rationale","")) or S["rationale"]
-                        })
-                    else:
-                        dr = kv.get("Direction","Bi-directional")
-                        S["Interface"].update({
-                            "system":_strip_vague(kv.get("System","")),
-                            "external":_strip_vague(kv.get("ExternalSystem","")),
-                            "standard":_strip_vague(kv.get("InterfaceStandard","")),
-                            "direction": dr if dr in ("In","Out","Bi-directional") else "Bi-directional",
-                            "data":_strip_vague(kv.get("DataItems","")),
-                            "perf":_strip_vague(kv.get("Performance","")),
-                            "conditions":_strip_vague(kv.get("Conditions",""))
-                        })
-                    # After autofill, seed preview from fields if preview is empty
-                    if not S.get("preview_req"):
-                        S["preview_req"] = _build_req_preview()
-                    st.success("Autofilled. Review and refine below.")
-        with c_an[1]:
-            if st.button("↺ Clear Fields (this type)"):
-                if S["req_type"] == "Functional":
-                    S["Functional"] = {"actor":"", "modal":"shall", "action":"", "object":"", "trigger":"", "conditions":"", "performance":""}
-                elif S["req_type"] == "Performance":
-                    S["Performance"] = {"function":"", "metric":"", "threshold":"", "unit":"", "conditions":"", "measurement":"", "verification":"Test"}
-                elif S["req_type"] == "Constraint":
-                    S["Constraint"] = {"subject":"", "constraint_text":"", "driver":"", "why":""}
-                else:
-                    S["Interface"] = {"system":"", "external":"", "standard":"", "direction":"Bi-directional", "data":"", "perf":"", "conditions":""}
-                st.info(f"{S['req_type']} fields cleared.")
-
-        # Fields (type-specific)
-        st.subheader("Structured Fields")
-        if S["req_type"] == "Functional":
-            F = S["Functional"]
-            c1, c2 = st.columns(2)
-            with c1:
-                F["actor"] = st.text_input("Actor / System", value=F["actor"], key="fun_actor")
-                F["modal"] = st.selectbox("Modal Verb", ["shall","will","must"], index=["shall","will","must"].index(F["modal"]) if F["modal"] in ["shall","will","must"] else 0, key="fun_modal")
-                F["action"] = st.text_input("Action / Verb", value=F["action"], key="fun_action")
-                F["object"] = st.text_input("Object", value=F["object"], key="fun_object")
-            with c2:
-                F["trigger"] = st.text_input("Trigger / Event (optional)", value=F["trigger"], key="fun_trigger")
-                F["conditions"] = st.text_input("Operating Conditions / State (optional)", value=F["conditions"], key="fun_cond")
-                F["performance"] = st.text_input("Performance / Constraint (optional, measurable)", value=F["performance"], key="fun_perf")
-        elif S["req_type"] == "Performance":
-            P = S["Performance"]
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                P["function"] = st.text_input("Function (what is measured)", value=P["function"], key="perf_func")
-                P["metric"] = st.text_input("Metric (e.g., latency, accuracy)", value=P["metric"], key="perf_metric")
-            with c2:
-                P["threshold"] = st.text_input("Threshold (number)", value=P["threshold"], key="perf_threshold")
-                P["unit"] = st.text_input("Unit", value=P["unit"], key="perf_unit")
-            with c3:
-                P["conditions"] = st.text_input("Conditions / State", value=P["conditions"], key="perf_cond")
-                P["measurement"] = st.text_input("Measurement Method", value=P["measurement"], key="perf_measure")
-                P["verification"] = st.selectbox("Verification Method", ["Test","Analysis","Inspection","Demonstration"],
-                                                 index=["Test","Analysis","Inspection","Demonstration"].index(P["verification"]),
-                                                 key="perf_verif")
-        elif S["req_type"] == "Constraint":
-            C = S["Constraint"]
-            c1, c2 = st.columns(2)
-            with c1:
-                C["subject"] = st.text_input("Subject (system/subsystem/component)", value=C["subject"], key="con_subject")
-                C["constraint_text"] = st.text_input("Constraint (what must hold true)", value=C["constraint_text"], key="con_text")
-            with c2:
-                C["driver"] = st.text_input("Driver / Standard / Policy", value=C["driver"], key="con_driver")
-                C["why"] = st.text_input("Rationale (optional)", value=C["why"], key="con_why")
-        else:
-            I = S["Interface"]
-            c1, c2 = st.columns(2)
-            with c1:
-                I["system"] = st.text_input("This System", value=I["system"], key="if_sys")
-                I["external"] = st.text_input("External System", value=I["external"], key="if_ext")
-                I["standard"] = st.text_input("Interface Standard / Protocol", value=I["standard"], key="if_std")
-            with c2:
-                I["direction"] = st.selectbox("Direction", ["In","Out","Bi-directional"],
-                                              index=["In","Out","Bi-directional"].index(I["direction"]), key="if_dir")
-                I["data"] = st.text_input("Data Items / Messages", value=I["data"], key="if_data")
-                I["perf"] = st.text_input("Performance (e.g., latency/throughput)", value=I["perf"], key="if_perf")
-            I["conditions"] = st.text_input("Conditions / Modes (optional)", value=I["conditions"], key="if_cond")
-
-    # ---------- Previews & Quality (always shown) ----------
-    st.subheader("Previews & Quality")
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**Need Preview (no 'shall')**")
-        st.markdown(f"> {_need_preview()}")
-
-    with right:
-        st.markdown("**Requirement Preview (editable)**")
-        # single editable surface for the preview
-        S["preview_req"] = st.text_area(
-            "Edit the requirement preview before sending to Final",
-            value=S["preview_req"] or _build_req_preview(),
-            height=90,
-            key="preview_req_edit_area"
-        )
-        # quick rebuild from fields if needed
-        if st.button("Rebuild Preview from Fields"):
-            S["preview_req"] = _build_req_preview()
-            st.info("Preview rebuilt from the structured fields.")
-
-        # quality checks on the edited preview
-        try:
-            amb = check_requirement_ambiguity(S["preview_req"], _get_rule_engine())
-        except TypeError:
-            amb = check_requirement_ambiguity(S["preview_req"])
-        except Exception:
-            amb = []
-        pas = check_passive_voice(S["preview_req"])
-        inc = check_incompleteness(S["preview_req"])
-        sing = _chk_sing(S["preview_req"])
-        qc = st.columns(4)
-        qc[0].write(("✅" if not amb else "⚠️") + " Unambiguous")
-        qc[1].write(("✅" if not pas else "⚠️") + " Active Voice")
-        qc[2].write(("✅" if not inc else "⚠️") + " Complete")
-        qc[3].write(("✅" if not sing else "⚠️") + " Singular")
-        if amb: st.caption(f"Ambiguous terms: {', '.join(amb)}")
-        if pas: st.caption(f"Passive voice: {', '.join(pas)}")
-        if sing: st.caption(f"Multiple actions: {', '.join(sing)}")
-
-    # ---------- Final Requirement ----------
-    st.subheader("Final Requirement")
-    cols_fr = st.columns([1,1])
-    with cols_fr[0]:
-        if st.button("Load Preview → Final"):
-            S["final_req"] = (S["preview_req"] or "").strip()
-            st.success("Loaded preview into Final.")
-    with cols_fr[1]:
-        if st.button("🤖 Review & Generate AC (Final)"):
-            if not st.session_state.api_key:
-                st.warning("Enter your Google AI API Key.")
-            elif not S.get("final_req","").strip():
-                st.error("Enter or load a Final requirement first.")
-            else:
-                prompt = f"""
-Act as a systems engineering reviewer. Provide a short critique and 3–6 testable acceptance criteria (each includes setup/conditions, threshold(s), and verification: Test/Analysis/Inspection/Demonstration).
-
-REQUIREMENT:
-\"\"\"{S['final_req'].strip()}\"\"\""""
-                raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                S["last_ai_raw"] = raw
-                bullets = []
-                for ln in raw.splitlines():
-                    if re.match(r'^\s*[-*•]\s+', ln):
-                        bullets.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                if bullets:
-                    S["final_ac"] = bullets
-                    st.success("Acceptance Criteria generated below.")
-                else:
-                    st.info("No bullets detected. See raw output under the expander below.")
-
-    # Safety defaults
-    S.setdefault("final_req", "")
-    S.setdefault("final_ac", [])
-
-    S["final_req"] = st.text_area("Final Requirement (single sentence, uses 'shall')",
-                                  value=S["final_req"], height=90, key="final_req_edit")
-
-    # ---------- Acceptance Criteria ----------
-    st.subheader("Acceptance Criteria")
-    ac_text = "\n".join(S.get("final_ac", []))
-    new_ac_text = st.text_area("One bullet per line", value=ac_text, height=130, key="need_ac_edit")
-    S["final_ac"] = [ln.strip() for ln in new_ac_text.splitlines() if ln.strip()]
-
-    # ---------- ID & Role for Final Requirement ----------
-    st.subheader("ID & Role for Final Requirement")
-    idrow = st.columns([1,1,1,1])
-    with idrow[0]:
-        S["final_id"] = st.text_input("Final Requirement ID", value=S.get("final_id",""), placeholder="e.g., REQ-001", key="final_req_id")
-    with idrow[1]:
-        S["final_role"] = st.radio("Role", ["Parent","Child"],
-                                   index=["Parent","Child"].index(S.get("final_role","Parent")), horizontal=True, key="final_role_radio")
-    with idrow[2]:
-        if S["final_role"] == "Child":
-            S["final_parent_id"] = st.text_input("Parent ID", value=S.get("final_parent_id",""), placeholder="e.g., REQ-000", key="final_parent_id")
-        else:
-            st.caption("Parent role: no parent ID needed.")
-    with idrow[3]:
-        if S["final_role"] == "Child" and (S.get("final_parent_id","").strip()):
-            if st.button("Generate Next Child ID"):
-                S["final_id"] = f"{S['final_parent_id'].strip()}.{int(S.get('child_next',1))}"
-                S["child_next"] = int(S.get("child_next",1)) + 1
-                st.success(f"Child: {S['final_id']}")
-
-    # ---------- Decomposition ----------
-    st.subheader("Decomposition")
-    st.caption("Choose a source and create a parent/children set. You can edit the parent text/ID and the child items, add or delete children.")
-
-    decomp_top = st.columns([1,1,2])
-    with decomp_top[0]:
-        S["decomp_source"] = st.selectbox("Decompose From", ["Need","Final Requirement"],
-                                          index=["Need","Final Requirement"].index(S["decomp_source"]),
-                                          key="decomp_source_sel")
-
-    def _parse_children_lines(text: str) -> list[str]:
-        out = []
-        for ln in (text or "").splitlines():
-            if re.match(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', ln):
-                out.append(re.sub(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', '', ln).strip())
-        return [x for x in out if x]
-
-    def _ai_parent_and_children_from_need(api_key: str, need_text: str) -> tuple[str, list[str]]:
-        prompt = f"""
-You are a systems engineer. From the following stakeholder NEED, propose exactly:
-- PARENT: a single top-level requirement sentence (use 'shall'), covering the overall capability.
-- CHILDREN: 3–8 singular child requirements that decompose the parent, each testable.
-
-Return strictly in this format (no extra prose):
-PARENT: <one sentence>
-CHILDREN:
-- <child 1>
-- <child 2>
-- <child 3>
-- ...
-
-NEED:
-\"\"\"{(need_text or '').strip()}\"\"\""""
-        raw = get_ai_suggestion(api_key, prompt) or ""
-        parent = ""
-        m = re.search(r'(?im)^\s*PARENT\s*:\s*(.+)$', raw)
-        if m: parent = m.group(1).strip()
-        children = _parse_children_lines(raw.split("CHILDREN", 1)[-1] if "CHILDREN" in raw else raw)
-        return parent, children
-
-    with decomp_top[1]:
-        if st.button("🧩 Generate Decomposition"):
-            if S["decomp_source"] == "Final Requirement":
-                if not S.get("final_req","").strip():
-                    st.error("Enter or load a Final requirement first.")
-                else:
-                    parent_text = S["final_req"].strip()
-                    parent_id = (S.get("final_parent_id","").strip()
-                                 if S.get("final_role","Parent") == "Child" and S.get("final_parent_id","").strip()
-                                 else S.get("final_id","").strip())
-                    if not st.session_state.api_key:
-                        st.warning("Enter your Google AI API Key to generate children.")
-                    else:
-                        raw = decompose_requirement_with_ai(st.session_state.api_key, parent_text) or ""
-                        S["last_ai_raw"] = raw
-                        kids = _parse_children_lines(raw)
-                        rows = []
-                        base = parent_id or "REQ-000"
-                        for i, txt in enumerate(kids, start=1):
-                            rows.append({"ID": f"{base}.{i}", "ParentID": parent_id, "Requirement Text": txt})
-                        S["decomp_parent_text"] = parent_text
-                        S["decomp_parent_id"] = parent_id
-                        S["decomp_rows"] = rows
-                        S["scroll_to"] = "decomp"
-                        st.rerun()
-            else:
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need first.")
-                else:
-                    with st.spinner("Creating parent and children…"):
-                        ptxt, kids = _ai_parent_and_children_from_need(st.session_state.api_key, S["need_text"])
-                    S["decomp_parent_text"] = (ptxt or "").strip()
-                    S["decomp_parent_id"] = S.get("final_id","").strip()
-                    rows = []
-                    base = S["decomp_parent_id"] or "REQ-000"
-                    for i, txt in enumerate(kids, start=1):
-                        rows.append({"ID": f"{base}.{i}", "ParentID": S["decomp_parent_id"], "Requirement Text": txt})
-                    S["decomp_rows"] = rows
-                    S["scroll_to"] = "decomp"
-                    st.rerun()
-
-    # ---- Editable Parent (for decomposition) ----
-    st.markdown("<div id='decomp_section'></div>", unsafe_allow_html=True)
-    if S["decomp_parent_text"] or S["decomp_rows"]:
-        st.markdown("**Decomposition Parent**")
-        dpc1, dpc2 = st.columns([3,1])
-        with dpc1:
-            S["decomp_parent_text"] = st.text_input("Parent Requirement (editable)",
-                                                    value=S["decomp_parent_text"], key="decomp_parent_text_edit")
-        with dpc2:
-            S["decomp_parent_id"] = st.text_input("Parent ID (editable)",
-                                                  value=S["decomp_parent_id"], placeholder="e.g., REQ-010",
-                                                  key="decomp_parent_id_edit")
-
-    # ---- Editable Children table ----
-    if S.get("decomp_rows"):
-        st.markdown("**Children (edit / add / delete)**")
-        parent_id = (S.get("decomp_parent_id","") or "").strip()
-        new_rows = []
-        for idx, row in enumerate(S["decomp_rows"], start=1):
-            cols = st.columns([0.07, 0.63, 0.20, 0.10])
-            with cols[0]:
-                st.write(f"{idx}.")
-            with cols[1]:
-                txt = st.text_input("Child Requirement", value=row.get("Requirement Text",""), key=f"decomp_child_txt_{idx}")
-            with cols[2]:
-                cid = st.text_input("Child ID", value=row.get("ID",""), key=f"decomp_child_id_{idx}")
-            with cols[3]:
-                if st.button("🗑️", key=f"decomp_child_del_{idx}"):
-                    S["decomp_rows"].pop(idx-1)
-                    st.rerun()
-            new_rows.append({"Requirement Text": txt, "ID": cid})
-
-        rows_persist = []
-        for r in new_rows:
-            rows_persist.append({"ID": r["ID"] or "", "ParentID": parent_id, "Requirement Text": r["Requirement Text"]})
-        S["decomp_rows"] = rows_persist
-
-        btns = st.columns([1,1,2])
-        with btns[0]:
-            if st.button("➕ Add Child"):
-                base = parent_id or "REQ-000"
-                next_idx = len(S["decomp_rows"]) + 1
-                S["decomp_rows"].append({"ID": f"{base}.{next_idx}", "ParentID": parent_id, "Requirement Text":"New child requirement"})
-                st.rerun()
-        with btns[1]:
-            if st.button("🔢 Renumber Children"):
-                base = parent_id or "REQ-000"
-                ren = []
-                for i, r in enumerate(S["decomp_rows"], start=1):
-                    ren.append({"ID": f"{base}.{i}", "ParentID": parent_id, "Requirement Text": r["Requirement Text"]})
-                S["decomp_rows"] = ren
-                st.success("Children renumbered.")
-
-        df = pd.DataFrame(S["decomp_rows"])
-        st.download_button("Download Decomposition (CSV)",
-                           df.to_csv(index=False).encode("utf-8"),
-                           file_name="Decomposition.csv",
-                           mime="text/csv",
-                           key="dl_decomp_csv")
-
-    else:
-        st.info("Use **🧩 Generate Decomposition** to create a parent and children set from the Need or from the Final requirement.")
-
-    # ---------- Raw AI output (optional) ----------
-    if S.get("last_ai_raw"):
-        with st.expander("Show last AI output (raw)"):
-            st.code(S["last_ai_raw"])
-
-    # ---------- Smooth scroll ----------
-    if S.get("scroll_to") == "decomp":
-        components.html("""
-            <script>
-              const el = document.getElementById('decomp_section');
-              if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }
-            </script>
-        """, height=0)
-        S["scroll_to"] = ""
-
-    # =========================
-    # Professional CSV Export
-    # =========================
-    st.subheader("Export Requirements (Professional CSV)")
-
-    def _g(val, default=""):  # safe get
-        return (val or default).strip() if isinstance(val, str) else (val if val is not None else default)
-
-    # Decide the "parent" row for export
-    parent_text = _g(S.get("decomp_parent_text")) or _g(S.get("final_req")) or _g(S.get("preview_req"))
-    parent_id   = _g(S.get("decomp_parent_id"))   or _g(S.get("final_id"))
-    role        = S.get("final_role","Parent")
-    src         = S.get("decomp_source","Need")  # "Need" or "Final Requirement"
-    req_type    = S.get("req_type","Functional")
-    priority    = S.get("priority","Should")
-    lifecycle   = S.get("lifecycle","Operations")
-    stakeholder = S.get("stakeholder","")
-    rationale   = _g(S.get("rationale"))
-    verification = ""
-    if req_type == "Performance":
-        verification = S.get("Performance",{}).get("verification","") or ""
-
-    # Acceptance criteria (only for the parent/final)
-    ac_joined = " | ".join(S.get("final_ac", [])) if S.get("final_ac") else ""
-
-    rows = []
-
-    # Parent row
-    if parent_text or parent_id:
-        rows.append({
-            "ID": parent_id,
-            "ParentID": "",
-            "Requirement Text": parent_text,
-            "Type": req_type,
-            "Role": "Parent" if role == "Parent" or not parent_id else role,
-            "Priority": priority,
-            "Lifecycle": lifecycle,
-            "Stakeholder": stakeholder,
-            "Source": src,  # Need / Final Requirement
-            "Verification": verification,
-            "Acceptance Criteria": ac_joined,
-            "Rationale": rationale
-        })
-
-    # Child rows from decomposition
-    for child in (S.get("decomp_rows") or []):
-        rows.append({
-            "ID": _g(child.get("ID")),
-            "ParentID": _g(child.get("ParentID") or parent_id),
-            "Requirement Text": _g(child.get("Requirement Text")),
-            "Type": req_type,
-            "Role": "Child",
-            "Priority": priority,
-            "Lifecycle": lifecycle,
-            "Stakeholder": stakeholder,
-            "Source": src,
-            "Verification": "",              # per-child verification left blank in this export
-            "Acceptance Criteria": "",       # per-child AC not collected here
-            "Rationale": rationale
-        })
-
-    if not rows:
-        st.info("No requirements to export yet. Enter a Final or Decomposition first.")
-    else:
-        df_pro = pd.DataFrame(rows, columns=[
-            "ID","ParentID","Requirement Text","Type","Role","Priority","Lifecycle","Stakeholder",
-            "Source","Verification","Acceptance Criteria","Rationale"
-        ])
-        st.download_button(
-            "⬇️ Download Requirements (CSV)",
-            data=df_pro.to_csv(index=False).encode("utf-8"),
-            file_name="Requirements_Export.csv",
-            mime="text/csv",
-            key="pro_export_csv"
-        )
-
-
-
-
-# ------------------------------ Tab: Chatbot ------------------------------
 with tab_chat:
-    pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
-    st.header("Chat with an AI Systems Engineering Assistant" + (f" — Project: {pname}" if pname else ""))
-
-    # --- state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []   # [{role: user|assistant, content: str}]
-    if "chat_temp" not in st.session_state:
-        st.session_state.chat_temp = 0.2
-    if "attach_ctx" not in st.session_state:
-        st.session_state.attach_ctx = True
-
-    # --- controls
-    c1, c2, c3 = st.columns([1,1,2])
-    with c1:
-        if st.button("Clear chat", key="chat_clear"):
-            st.session_state.messages = []
-            st.rerun()
-    with c2:
-        st.session_state.chat_temp = st.slider("Creativity", 0.0, 0.9, st.session_state.chat_temp, 0.1,
-                                               help="Model temperature (lower = more deterministic)")
-    with c3:
-        st.session_state.attach_ctx = st.toggle("Attach project context", value=st.session_state.attach_ctx,
-                                                help="Adds recent project requirements to reduce hallucinations")
-
-    st.caption("Try slash-commands: `/analyze <req>`, `/rewrite <req>`, `/ac <req> method=Test|Analysis|Inspection|Demonstration`, `/decompose <req>`, `/help`.")
-
-    # --- render transcript
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # --- helpers
-    SE_SYSTEM_PROMPT = (
-        "You are an expert Systems Engineer. Follow INCOSE/ISO 29148 style. "
-        "Prefer EARS patterns, active voice with 'shall', measurable thresholds, and V&V guidance. "
-        "Avoid vague words (user-friendly, optimal, efficient, etc.). "
-        "If asked to produce a requirement: ONE sentence requirement + then 3–6 acceptance criteria."
-    )
-
-    def _safe_project_context() -> str:
-        """Try to fetch a compact list of project requirements as context. Safe if db helper not present."""
-        if not st.session_state.selected_project:
-            return ""
-        try:
-            pid = st.session_state.selected_project[0]
-            # Try common helper names; wrap in try/except to remain non-breaking
-            lines = []
-            if hasattr(db, "get_requirements_for_project"):
-                rows = db.get_requirements_for_project(pid)  # expect [(id,text),...] or similar
-                for r in rows[:200]:
-                    rid, rtx = (r[0], r[1]) if len(r) >= 2 else (str(r[0]), str(r[0]))
-                    lines.append(f"{rid}: {rtx}")
-            elif hasattr(db, "get_documents_for_project") and hasattr(db, "get_requirements_for_document"):
-                # Fallback: collect a few from the latest document versions
-                docs = db.get_documents_for_project(pid)
-                docs = sorted(docs, key=lambda x: x[2], reverse=True)[:3]  # newest few
-                for (doc_id, file_name, version, uploaded_at, clarity_score) in docs:
-                    try:
-                        reqs = db.get_requirements_for_document(doc_id)
-                        for rr in reqs[:80]:
-                            rid, rtx = (rr[0], rr[1]) if len(rr) >= 2 else (str(rr[0]), str(rr[0]))
-                            lines.append(f"{rid}: {rtx}")
-                    except Exception:
-                        continue
-            if not lines:
-                return ""
-            return "PROJECT CONTEXT:\n" + "\n".join(lines[:200])
-        except Exception:
-            return ""
-
-    def _auto_fix_if_flagged(text: str) -> str:
-        """Run your analyzer; if ambiguity/passive/incomplete found, ask AI for a single clean rewrite once."""
-        amb = safe_call_ambiguity(text, rule_engine)
-        pas = check_passive_voice(text)
-        inc = check_incompleteness(text)
-        try:
-            sing = check_singularity(text)
-        except Exception:
-            sing = []
-        # Only fix clarity issues; do NOT auto-decompose here
-        if amb or pas or inc:
-            fix_list = []
-            if amb: fix_list.append(f"remove ambiguity ({', '.join(amb)})")
-            if pas: fix_list.append("active voice")
-            if inc: fix_list.append("complete the sentence")
-            guidance = "; ".join(fix_list)
-            fix_prompt = f"""Rewrite the following as ONE clear, singular, verifiable requirement using 'shall' in active voice; {guidance}. Return only the sentence.
-Requirement:
-\"\"\"{text}\"\"\""""
-            try:
-                fixed = get_ai_suggestion(st.session_state.api_key, fix_prompt)
-                return fixed.strip() or text
-            except Exception:
-                return text
-        return text
-
-    def _to_gemini_history(messages: list[dict], system_prompt: str = "", project_ctx: str = "") -> list[dict]:
-        """
-        Convert UI chat history (roles: user/assistant) into Gemini-compatible history (roles: user/model).
-        We prepend system prompt & project context as a single 'user' message.
-        """
-        hist = []
-        preface_parts = []
-        if system_prompt.strip():
-            preface_parts.append(system_prompt.strip())
-        if project_ctx.strip():
-            preface_parts.append(project_ctx.strip())
-        if preface_parts:
-            hist.append({"role": "user", "parts": ["\n\n".join(preface_parts)]})
-
-        for m in messages:
-            role = m.get("role", "user")
-            content = m.get("content", "")
-            if not content:
-                continue
-            if role == "user":
-                hist.append({"role": "user", "parts": [content]})
-            else:
-                # map assistant -> model for Gemini
-                hist.append({"role": "model", "parts": [content]})
-        return hist
-
-    def _handle_slash(prompt: str):
-        p = prompt.strip()
-        if p == "/help":
-            return (
-                "Commands:\n"
-                "- `/analyze <requirement>` → run ambiguity/passive/incomplete/singularity checks\n"
-                "- `/rewrite <requirement>` → AI rewrite to clear, verifiable sentence\n"
-                "- `/ac <requirement> method=Test|Analysis|Inspection|Demonstration` → generate AC bullets\n"
-                "- `/decompose <requirement>` → break into singular requirements"
-            )
-        if p.startswith("/analyze "):
-            t = p[len("/analyze "):]
-            amb = safe_call_ambiguity(t, rule_engine)
-            pas = check_passive_voice(t)
-            inc = check_incompleteness(t)
-            try:
-                sing = check_singularity(t)
-            except Exception:
-                sing = []
-            issues = []
-            if amb: issues.append(f"Ambiguity: {', '.join(amb)}")
-            if pas: issues.append(f"Passive: {', '.join(pas)}")
-            if inc: issues.append("Incompleteness")
-            if sing: issues.append(f"Multiple actions: {', '.join(sing)}")
-            return "Analysis:\n- " + ("\n- ".join(issues) if issues else "No major issues found.")
-        if p.startswith("/rewrite "):
-            t = p[len("/rewrite "):]
-            return get_ai_suggestion(st.session_state.api_key, t)
-        if p.startswith("/ac "):
-            body = p[len("/ac "):]
-            method = None
-            if " method=" in body:
-                body, method = body.split(" method=", 1)
-            prompt_ac = f"""Return ONLY bullets (3–6). Each bullet must include setup/conditions + numeric threshold + verification method.
-Requirement:
-\"\"\"{body.strip()}\"\"\"
-Verification Method: {method or 'Test'}"""
-            return get_ai_suggestion(st.session_state.api_key, prompt_ac)
-        if p.startswith("/decompose "):
-            t = p[len("/decompose "):]
-            return decompose_requirement_with_ai(st.session_state.api_key, t)
-        return None
-
-    # --- input
-    prompt = st.chat_input("Ask a question about your requirements… (or /help)")
-    if prompt:
-        if not st.session_state.api_key:
-            st.warning("Please enter your Google AI API Key at the top of the page to use the chatbot.")
-        else:
-            # append user to transcript
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            # slash-commands first
-            cmd = _handle_slash(prompt)
-            if cmd is not None:
-                response = cmd
-            else:
-                # Build Gemini-compatible history
-                project_ctx = _safe_project_context() if st.session_state.attach_ctx else ""
-                api_history = _to_gemini_history(st.session_state.messages, SE_SYSTEM_PROMPT, project_ctx)
-
-                # Call your existing helper
-                with st.spinner("AI is thinking..."):
-                    response = get_chatbot_response(st.session_state.api_key, api_history)
-
-                # One-pass auto-fix if analyzer flags clarity issues
-                response = _auto_fix_if_flagged(response)
-
-            # show + save assistant message (UI role = assistant; Gemini role mapped when sending)
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            with st.chat_message("assistant"):
-                st.markdown(response)
-
-            # quick actions
-            ca1, ca2 = st.columns([1,1])
-            with ca1:
-                if st.button("📌 Use as Final Requirement", key=f"use_final_{len(st.session_state.messages)}"):
-                    try:
-                        first_line = response.strip().split("\n", 1)[0]
-                        if "need_tutor" in st.session_state:
-                            st.session_state.need_tutor["final_req"] = first_line[:500]
-                        st.success("Sent to Need tab → Final Requirement.")
-                    except Exception:
-                        st.info("Open Need tab to paste manually.")
-            with ca2:
-                if st.button("➕ Add to Acceptance Criteria", key=f"add_ac_{len(st.session_state.messages)}"):
-                    bullets = [ln for ln in response.splitlines() if ln.strip().startswith(("-", "*"))]
-                    if bullets and "need_tutor" in st.session_state:
-                        nt = st.session_state.need_tutor
-                        nt["final_ac"] = nt.get("final_ac", []) + [b.strip("-* ").strip() for b in bullets]
-                        st.success("Acceptance Criteria appended in Need tab.")
-                    else:
-                        st.info("No bullet points found in the last reply.")
-
+    render_chat_tab(st, db, rule_engine, CTX)
