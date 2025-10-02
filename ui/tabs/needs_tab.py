@@ -1,777 +1,662 @@
 # ui/tabs/need_tab.py
+from __future__ import annotations
+
 import re
-import json
+import time
+from typing import Callable
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
+# -------- Streamlit rerun compatibility (new & old) --------
+def _rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+
+# ----------------- Resilient LLM wrapper -------------------
+def _llm_retry(api_fn: Callable[[str], str], prompt: str, retries: int = 2, backoff: float = 0.8) -> str:
+    def retriable(msg: str) -> bool:
+        m = (msg or "").lower()
+        return any(x in m for x in ["429", "quota", "rate", "timeout", "500", "503", "internal"])
+    last = ""
+    for i in range(retries + 1):
+        try:
+            out = api_fn(prompt) or ""
+            if retriable(out):
+                raise RuntimeError(out)
+            return out.strip()
+        except Exception as e:
+            last = str(e)
+            if i < retries and retriable(last):
+                time.sleep(backoff * (i + 1))
+                continue
+            st.warning(f"AI service error: {last}. Using local fallback.")
+            return ""
+
+# ----------------- Domain fallbacks ------------------------
+def _thermal_questions_with_examples() -> list[str]:
+    return [
+        "What temperature limits apply per subsystem and location? → e.g., Batteries: 0–40 °C; Avionics: −10–50 °C; Payload optics: T_nom ±2 °C.",
+        "Under which modes/conditions must limits hold? → e.g., Eclipse, full sun, payload on, comm windows, safe mode.",
+        "What time-at-limit and averaging windows apply? → e.g., ≤30 s excursion; 60 s rolling average.",
+        "What heater/cooler power budgets apply? → e.g., Heaters ≤10 W average per orbit; radiator area TBD_m².",
+        "Which environments/disturbances are assumed? → e.g., SRP, thermal cycling, internal dissipation TBD_W.",
+        "How is compliance verified across lifecycle? → e.g., TVAC test, thermal model correlation, in-orbit telemetry trending.",
+        "What contingencies/faults must be handled? → e.g., sensor failure, heater open/short, unexpected thermal spike.",
+        "What control/estimation update rates are required? → e.g., thermal control loop TBD_Hz; telemetry sample ≥1 Hz.",
+    ]
+
+def _thermal_parent_from_need(_: str) -> str:
+    return "The System shall maintain onboard component temperatures within specified operational limits throughout the mission duration."
+
+def _thermal_children_default() -> list[str]:
+    return [
+        "The System shall regulate battery temperatures between 0 °C and 40 °C during all mission phases.",
+        "The System shall maintain payload optics within ±2 °C of nominal during active imaging sessions.",
+        "The System shall ensure avionics boards remain within −10 °C to 50 °C during eclipse and full sun.",
+        "The System shall limit heater average power to ≤ 10 W per orbit while meeting thermal limits.",
+        "The System shall detect and log thermal excursions > TBD_°C lasting > 30 s and flag a fault.",
+        "Thermal compliance shall be verified by TVAC testing, correlated thermal analysis, and in-orbit telemetry review.",
+    ]
+
+def _uas_questions_with_examples() -> list[str]:
+    return [
+        "What mission profiles and environments apply? → e.g., urban BVLOS, over-water, Class G airspace, wind ≤12 m/s.",
+        "What performance thresholds define success? → e.g., endurance ≥45 min; payload mass ≤2 kg; range ≥15 km.",
+        "What command-and-control and link requirements apply? → e.g., C2 link ≥99.5% availability; latency ≤200 ms.",
+        "What navigation and geo-fencing limits apply? → e.g., RTH on GNSS loss; fence radius TBD_m; altitude ≤120 m AGL.",
+        "What safety/redundancy requirements apply? → e.g., parachute deploy under loss-of-thrust; detect-and-avoid class TBD.",
+        "What GCS human-factors constraints apply? → e.g., UI alerts within 1 s; max operator workload TBD.",
+        "What regulatory/airworthiness constraints apply? → e.g., Part 107/CAA equivalent; remote ID compliance.",
+        "How will performance be verified? → e.g., flight test matrix, SIL/HIL, log analysis.",
+    ]
+
+def _uas_parent_from_need(_: str) -> str:
+    return "The System shall provide an Unmanned Aerial Vehicle and Ground Control Station that achieve the specified mission performance and safety constraints."
+
+def _uas_children_default() -> list[str]:
+    return [
+        "The UAV shall achieve flight endurance ≥ TBD_min under nominal payload and wind conditions.",
+        "The System shall maintain C2 link availability ≥ TBD_% with one-way latency ≤ TBD_ms.",
+        "The UAV shall enforce geo-fencing with horizontal error ≤ TBD_m and altitude error ≤ TBD_m AGL.",
+        "The System shall provide return-to-home on GNSS loss or link loss within ≤ TBD_s detection time.",
+        "The UAV shall carry payload mass up to TBD_kg without exceeding takeoff weight limits.",
+        "The GCS shall present critical alerts within ≤ TBD_s of trigger and log them with timestamps.",
+        "The System shall comply with TBD_regulatory framework including Remote ID and operational constraints.",
+    ]
+
+# ----------------- Generic fallbacks ------------------------
+def _generic_questions_with_examples() -> list[str]:
+    return [
+        "What metric(s) define success with units and thresholds? → e.g., ≤ TBD_unit.",
+        "Under which modes/conditions must this hold? → e.g., nominal, safe, maintenance.",
+        "What timing/resource limits apply? → e.g., ≤ TBD_s; ≤ TBD_W.",
+        "What environment assumptions/disturbances apply? → e.g., vibration, radiation, SRP.",
+        "How will compliance be verified? → e.g., Test/Analysis/Inspection/Demo.",
+        "What contingencies/faults must be handled? → e.g., sensor/actuator failure.",
+    ]
+
+def _fallback_parent(_: str) -> str:
+    return "The System shall achieve the stated objective under specified conditions."
+
+def _fallback_children() -> list[str]:
+    return [
+        "The System shall meet TBD_metric ≤ TBD_value TBD_unit under TBD_conditions.",
+        "Compliance shall be verified by TBD_Method.",
+    ]
+
+# ----------------- Need normalizer --------------------------
+_NEED_SHALL_RX = re.compile(r"\b(shall|must|will)\b", re.I)
+
+def _normalize_need(raw: str) -> str:
+    txt = (raw or "").strip()
+    if not txt:
+        return ""
+    if _NEED_SHALL_RX.search(txt):
+        txt_no_modal = re.sub(r"\b(the\s+)?(system|uav|vehicle|spacecraft|satellite|platform)\b\s+(shall|must|will)\s+", "", txt, flags=re.I)
+        txt_no_modal = re.sub(r"\b(shall|must|will)\s+", "", txt_no_modal, flags=re.I)
+        txt = re.sub(r"^\s*(to\s+)?", "", txt_no_modal).strip()
+        if not re.match(r"^(enable|provide|maintain|perform|achieve|support)\b", txt, re.I):
+            txt = "Enable " + txt[0].lower() + txt[1:]
+    txt = re.sub(r"\s+", " ", txt)
+    return txt.rstrip(" .")
+
+# ----------------- Domain routing ---------------------------
+def _detect_domain(need: str) -> str:
+    low = (need or "").lower()
+    if any(k in low for k in ["thermal", "temperature", "heater", "radiator", "eclipse", "sun", "tvac"]):
+        return "thermal"
+    if any(k in low for k in ["uav", "uas", "drone", "gcs", "unmanned", "ground control station"]):
+        return "uas"
+    return "generic"
+
+# ----------------- Render Tab -------------------------------
 def render(st, db, rule_engine, CTX):
     """
-    Need → Requirement Assistant tab.
-    Uses the same logic you had; just split out.
+    Need → Questions (with → e.g.) → Requirements (strict look & feel).
+    - One-click generation (AI + robust fallbacks) with NEED sanitizer.
+    - Auto single vs parent→children vs group-of-standalone requirements.
+    - Editable IDs & text; Rewrite; Decompose only when non-singular; Structured dropdown editor; Delete.
+    - Per-item V&V/traceability: Verification Method/Level/Evidence, Validation Need ID, Test Case IDs, Allocated To, plus Status & Criticality.
+    - CSV export includes all new fields.
     """
-    # ---------- SAFE analyzer/AI helpers pulled from CTX ----------
-    safe_call_ambiguity = CTX["safe_call_ambiguity"]
-    check_passive_voice = CTX["check_passive_voice"]
-    check_incompleteness = CTX["check_incompleteness"]
-    check_singularity = CTX["check_singularity"]
 
-    get_ai_suggestion = CTX["get_ai_suggestion"]
-    decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
-
-    # Strict autofill may be missing; we attempt to import locally (keeps original behavior)
-    try:
-        from llm.ai_suggestions import analyze_need_autofill as _strict_autofill
-    except Exception:
-        _strict_autofill = None
-
-    # ---------- Optional alternate rules (kept as-is) ----------
-    try:
-        from core.rules import RuleEngine as _RealRuleEngine
-    except Exception:
-        _RealRuleEngine = None
-
-    class _FallbackRuleEngine:
-        def is_check_enabled(self, name: str) -> bool: return True
-        def get_ambiguity_terms(self): return []
-        def get_custom_weak_words(self): return []
-        def get_ambiguity_words(self): return []
-        def get_weak_words(self): return []
-
-    def _get_rule_engine():
-        try:
-            return _RealRuleEngine() if _RealRuleEngine is not None else _FallbackRuleEngine()
-        except Exception:
-            return _FallbackRuleEngine()
+    # Analyzer & LLM hooks
+    safe_call_ambiguity = CTX.get("safe_call_ambiguity", lambda t, e=None: [])
+    check_passive_voice = CTX.get("check_passive_voice", lambda t: [])
+    check_incompleteness = CTX.get("check_incompleteness", lambda t: [])
+    check_singularity = CTX.get("check_singularity", lambda t: [])
+    get_ai_suggestion = CTX.get("get_ai_suggestion", lambda *a, **k: "")
+    decompose_requirement_with_ai = CTX.get("decompose_requirement_with_ai", lambda *a, **k: "")
 
     # ---------- State ----------
-    def _init_state():
-        if "need_ui" not in st.session_state:
-            st.session_state.need_ui = {
-                # top
-                "mode":"Detailed",
-                "req_type":"Functional",
-                "stakeholder":"", "priority":"Should", "lifecycle":"Operations",
-                # content
-                "need_text":"", "rationale":"",
-                # structured fields (for Detailed)
-                "Functional":{"actor":"", "modal":"shall", "action":"", "object":"", "trigger":"", "conditions":"", "performance":""},
-                "Performance":{"function":"", "metric":"", "threshold":"", "unit":"", "conditions":"", "measurement":"", "verification":"Test"},
-                "Constraint":{"subject":"", "constraint_text":"", "driver":"", "why":""},
-                "Interface":{"system":"", "external":"", "standard":"", "direction":"Bi-directional", "data":"", "perf":"", "conditions":""},
-                # previews/output
-                "preview_req":"",          # now the ONLY editable preview surface
-                "final_req":"",            # explicit final requirement (user-loaded)
-                "final_ac":[],             # acceptance criteria (editable)
-                "last_ai_raw":"",          # latest AI raw (review/decompose)
-                # IDs & role (simple)
-                "final_role":"Parent",     # "Parent" or "Child"
-                "final_id":"",             # ID for the Final Requirement
-                "final_parent_id":"",      # only if final is a child
-                "child_next":1,            # next child integer suffix for quick generate
-                # Decomposition
-                "decomp_source":"Need",    # "Need" or "Final Requirement"
-                "decomp_parent_text":"",   # parent text used in decomposition section (editable)
-                "decomp_parent_id":"",     # parent id used in decomposition section (editable)
-                "decomp_rows":[],          # list of {"ID","ParentID","Requirement Text"}
-                "scroll_to":""
-            }
-    _init_state()
+    if "need_ui" not in st.session_state:
+        st.session_state.need_ui = {}
     S = st.session_state.need_ui
+    S.setdefault("req_type", "Functional")
+    S.setdefault("priority", "Should")
+    S.setdefault("lifecycle", "Operations")
+    S.setdefault("stakeholder", "")
+    S.setdefault("need_text", "")
+    S.setdefault("rationale", "")
+    S.setdefault("ai_questions", [])
+    S.setdefault("requirements", [])
+    S.setdefault("child_counts", {})  # parent_id -> next int
+    S.setdefault("need_id", "NEED-001")  # NEW: Need ID for validation/traceability
 
     # ---------- Header ----------
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     st.header("✍️ Need → Requirement Assistant" + (f" — Project: {pname}" if pname else ""))
 
     # ---------- Top controls ----------
-    c_top = st.columns([1,1,1,1,1])
+    c_top = st.columns(5)
     with c_top[0]:
-        S["mode"] = st.radio("Mode", ["Simple","Detailed"], index=["Simple","Detailed"].index(S["mode"]),
-                             horizontal=True, key="need_mode_top")
-    with c_top[1]:
         S["req_type"] = st.selectbox("Requirement Type",
-            ["Functional","Performance","Constraint","Interface"],
-            index=["Functional","Performance","Constraint","Interface"].index(S["req_type"]),
-            key="need_reqtype_top")
+                                     ["Functional", "Performance", "Constraint", "Interface"],
+                                     index=["Functional", "Performance", "Constraint", "Interface"].index(S["req_type"]))
+    with c_top[1]:
+        S["priority"] = st.selectbox("Priority", ["Must", "Should", "Could", "Won't (now)"],
+                                     index=["Must", "Should", "Could", "Won't (now)"].index(S["priority"]))
     with c_top[2]:
-        S["priority"] = st.selectbox("Priority", ["Must","Should","Could","Won't (now)"],
-                                     index=["Must","Should","Could","Won't (now)"].index(S["priority"]),
-                                     key="need_priority_top")
+        S["lifecycle"] = st.selectbox("Life-cycle",
+                                      ["Concept", "Development", "P/I/V&V", "Operations", "Maintenance", "Disposal"],
+                                      index=["Concept", "Development", "P/I/V&V", "Operations", "Maintenance", "Disposal"].index(S["lifecycle"]))
     with c_top[3]:
-        S["lifecycle"] = st.selectbox("Life-cycle", ["Concept","Development","P/I/V&V","Operations","Maintenance","Disposal"],
-                                      index=["Concept","Development","P/I/V&V","Operations","Maintenance","Disposal"].index(S["lifecycle"]),
-                                      key="need_lifecycle_top")
-    with c_top[4]:
         S["stakeholder"] = st.text_input("Stakeholder / Role", value=S["stakeholder"],
-                                         placeholder="e.g., Field operator, Acquirer", key="need_stakeholder_top")
+                                         placeholder="e.g., Flight operator, Acquirer")
+    with c_top[4]:
+        S["need_id"] = st.text_input("Need ID", value=S["need_id"], help="Used for Validation link & traceability (e.g., NEED-001)")
 
     # ---------- Need & Rationale ----------
-    st.subheader("Stakeholder Need")
-    S["need_text"] = st.text_area("Describe the need (no 'shall')", value=S["need_text"], height=110,
-                                  placeholder="e.g., The operator needs the drone to warn about low battery to avoid mission aborts.",
-                                  key="need_text_area")
-    S["rationale"] = st.text_area("Rationale (why this matters)", value=S["rationale"], height=80,
-                                  placeholder="e.g., Prevent mission failure and avoid emergency landings.",
-                                  key="need_rat_area")
+    st.subheader("🧩 Stakeholder Need")
+    S["need_text"] = st.text_area(
+        "Describe the need (no 'shall')",
+        value=S["need_text"],
+        height=110,
+        placeholder="e.g., Maintain onboard component temperatures within operational limits throughout the mission duration.",
+    )
 
-    # ---------- Helpers (formatting only; analyzer unchanged) ----------
-    _VAGUE = ("all specified","as needed","as soon as possible","etc.","including but not limited to")
-    def _strip_vague(t: str) -> str:
-        x = (t or "")
-        for b in _VAGUE: x = x.replace(b, "")
-        return re.sub(r"\s{2,}", " ", x).strip(" ,.")
+    if _NEED_SHALL_RX.search(S["need_text"] or ""):
+        st.info("Heads-up: Your need text contains “shall/must/will”. I’ll treat it as an objective (not a requirement) during generation.")
 
-    def _strip_perf_from_object(obj: str, perf: str) -> tuple[str,str]:
-        o = (obj or "").strip(); p = (perf or "").strip()
-        if not o: return o, p
-        rxes = [
-            r'\bwith (a )?probability of\s*[0-9]*\.?[0-9]+%?',
-            r'\b(minimum|maximum|at least|no more than)\s*[0-9]*\.?[0-9]+%?\b',
-            r'\b\d+(\.\d+)?\s*(ms|s|sec|m|km|Hz|kHz|MHz|kbps|Mbps|Gbps|fps)\b',
-            r'\b\d+(\.\d+)?\s*%(\b|$)'
-        ]
-        extracted = []
-        for rx in rxes:
-            m = re.search(rx, o, flags=re.I)
-            if m:
-                extracted.append(m.group(0))
-                o = (o[:m.start()] + o[m.end():]).strip(" ,.")
-        if extracted:
-            extra = " ".join(extracted)
-            if p and extra not in p: p = f"{p}; {extra}"
-            if not p: p = extra
-        return o, p
+    st.subheader("🎯 Rationale")
+    S["rationale"] = st.text_area(
+        "Why this matters",
+        value=S["rationale"],
+        height=80,
+        placeholder="e.g., Temperature regulation is critical to ensure electronics, batteries, and payloads function reliably.",
+    )
 
-    def _push_need_context_to_conditions(conds: str, need_text: str) -> str:
-        base = (conds or "")
-        nl = (need_text or "").lower()
-        bits = []
-        if "contested airspace" in nl and "contested airspace" not in base.lower():
-            bits.append("in contested airspace")
-        if ("avoid" in nl or "avoiding detection" in nl or "stealth" in nl) and not re.search(r"detect|avoid", base, flags=re.I):
-            bits.append("while minimizing detectability by adversary sensors")
-        if "return" in nl and "return" not in base.lower():
-            bits.append("and return safely to base")
-        if bits:
-            base = (base + " " + " ".join(bits)).strip()
-        return re.sub(r"\s{2,}", " ", base)
-
-    def _normalize_trigger(trig: str) -> str:
-        t = (trig or "").strip(" ,.")
-        if not t: return ""
-        t = re.sub(r'^\s*when\s+when\s+', 'when ', t, flags=re.I)
-        if not re.match(r'^(when|if|while|during)\b', t, flags=re.I):
-            t = "when " + t
-        return t
-
-    # ---------- Previews ----------
-    def _need_preview():
-        raw_need = (S["need_text"] or "").strip()
-        if raw_need.lower().startswith(("the ","a ","an ","i ","we ","user ","operator ","stakeholder ","mission")):
-            text = raw_need
-        else:
-            text = f"The {S['stakeholder'] or 'stakeholder'} needs the system to {raw_need or '[describe need]'}"
-        text += f" so that {S['rationale'].strip()}." if S["rationale"].strip() else "."
-        return text
-
-    def _build_req_preview():
-        t = S["req_type"]
-        if t == "Functional":
-            f = S["Functional"]
-            actor = (f["actor"] or "[Actor]").strip()
-            modal = (f["modal"] or "shall").strip()
-            action = (f["action"] or "[action]").strip()
-            obj = (f["object"] or "[object]").strip()
-            trig = _normalize_trigger(f["trigger"])
-            cond = _strip_vague(f["conditions"])
-            perf = _strip_vague(f["performance"])
-            prefix = (trig + ", ") if trig else ""
-            tail_perf = f" {perf}" if perf and perf.lower() not in obj.lower() else ""
-            tail_cond = f" {cond}" if cond else ""
-            snt = f"{prefix}{actor} {modal} {action} {obj}{tail_perf}{tail_cond}"
-            snt = re.sub(r"\s{2,}", " ", snt).strip()
-            if not snt.endswith("."): snt += "."
-            return snt
-        if t == "Performance":
-            p = S["Performance"]
-            seg_cond = f" under {p['conditions']}" if p["conditions"] else ""
-            seg_meas = f" as measured by {p['measurement']}" if p["measurement"] else ""
-            return f"The {p['function'] or '[function]'} shall have {p['metric'] or '[metric]'} {p['threshold'] or '[value]'} {p['unit'] or '[unit]'}{seg_cond}{seg_meas}."
-        if t == "Constraint":
-            c = S["Constraint"]
-            seg = f" per {c['driver']}" if c["driver"] else ""
-            return f"The {c['subject'] or '[subject]'} shall comply with {c['constraint_text'] or '[constraint]'}{seg}."
-        if t == "Interface":
-            i = S["Interface"]
-            seg_perf = f" with {i['perf']}" if i["perf"] else ""
-            seg_cond = f" under {i['conditions']}" if i["conditions"] else ""
-            return f"The {i['system'] or '[system]'} shall interface with {i['external'] or '[external system]'} via {i['standard'] or '[standard]'} ({i['direction']}). It shall exchange {i['data'] or '[data]'}{seg_perf}{seg_cond}."
-        return ""
-
-    # Initialize preview once if empty (avoid overwriting user edits each render)
-    if not S.get("preview_req"):
-        S["preview_req"] = _build_req_preview()
-
-    # ---------- SIMPLE MODE ACTION ROW ----------
-    if S["mode"] == "Simple":
-        row = st.columns([1.2, 1.2, 1.1, 1.1, 1.0])
-        with row[0]:
-            if st.button("🚀 Generate Requirement"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need.")
-                else:
-                    prompt = f"""
-You are a systems engineer. Convert the NEED into ONE clear, testable {S['req_type']} requirement (use 'shall') and 3–6 acceptance criteria.
-
-NEED:
-\"\"\"{S['need_text'].strip()}\"\"\"\n
-RATIONALE:
-\"\"\"{S['rationale'].strip()}\"\"\"\n
-Return STRICTLY:
-
-REQUIREMENT: <one sentence, active voice, measurable where applicable>
-
-ACCEPTANCE CRITERIA:
-- <criterion 1 with setup/conditions + threshold + verification method>
-- <criterion 2>
-- <criterion 3>
-"""
-                    raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    S["last_ai_raw"] = raw
-                    req = ""
-                    m = re.search(r'(?im)^\s*REQUIREMENT\s*:\s*(.+)$', raw)
-                    if m: req = m.group(1).strip()
-                    if not req:
-                        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-                        req = next((ln for ln in lines if re.search(r'\bshall\b', ln, re.I)), "")
-                    if req:
-                        S["preview_req"] = req
-
-                    ac = []
-                    ac_block = raw.split("ACCEPTANCE CRITERIA", 1)[-1] if "ACCEPTANCE CRITERIA" in raw else ""
-                    for ln in (ac_block or "").splitlines():
-                        if re.match(r'^\s*[-*•]\s+', ln):
-                            ac.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                    S["final_ac"] = ac
-                    st.success("Requirement generated. Review below.")
-        with row[1]:
-            if st.button("🪄 Improve Requirement"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["preview_req"].strip():
-                    st.error("Generate a requirement first.")
-                else:
-                    base = S["preview_req"].strip()
-                    prompt = f"""Rewrite this as a single, clear, unambiguous, testable sentence in active voice using 'shall'. Return only the sentence.
-
-\"\"\"{base}\"\"\""""
-                    out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    if out.strip():
-                        S["preview_req"] = out.strip().splitlines()[0]
-                        st.success("Requirement refined.")
-        with row[2]:
-            if st.button("🤖 Review & Generate AC"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["preview_req"].strip():
-                    st.error("Enter or generate a requirement first.")
-                else:
-                    prompt = f"""
-Act as a systems engineering reviewer. Provide a short critique and 3–6 testable acceptance criteria (each includes setup/conditions, threshold(s), and verification: Test/Analysis/Inspection/Demonstration).
-
-REQUIREMENT:
-\"\"\"{S['preview_req'].strip()}\"\"\""""
-                    raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                    S["last_ai_raw"] = raw
-                    bullets = []
-                    for ln in raw.splitlines():
-                        if re.match(r'^\s*[-*•]\s+', ln):
-                            bullets.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                    if bullets:
-                        S["final_ac"] = bullets
-                        st.success("Acceptance Criteria generated.")
-        with row[3]:
-            if st.button("🧩 Decompose"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                else:
-                    src = S.get("decomp_source","Need")
-                    base = S["need_text"].strip() if src == "Need" else S["preview_req"].strip()
-                    if not base:
-                        st.error(f"Enter a {src.lower()} to decompose.")
-                    else:
-                        S["last_ai_raw"] = decompose_requirement_with_ai(st.session_state.api_key, base) or ""
-                        rows, idx = [], 1
-                        for ln in (S["last_ai_raw"] or "").splitlines():
-                            if re.match(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', ln):
-                                txt = re.sub(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', '', ln).strip()
-                                if txt:
-                                    parent = S.get("final_id","").strip() or S.get("final_parent_id","").strip()
-                                    cid = f"{(parent or 'REQ-000')}.{idx}"
-                                    rows.append({"ID": cid, "ParentID": parent, "Requirement Text": txt})
-                                    idx += 1
-                        S["decomp_rows"] = rows
-                        S["decomp_parent_text"] = S["preview_req"].strip() if src == "Final Requirement" else ""
-                        S["decomp_parent_id"] = S.get("final_id","").strip()
-                        S["scroll_to"] = "decomp"
-                        st.rerun()
-        with row[4]:
-            if st.button("↺ Reset"):
-                _init_state()
-                st.rerun()
-
-    # ---------- DETAILED MODE ----------
-    if S["mode"] == "Detailed":
-        st.caption("Use **Analyze Need (AI Autofill)** to seed fields; then refine and preview.")
-        c_an = st.columns([1,1,2])
-        with c_an[0]:
-            if st.button("🔎 Analyze Need (AI Autofill)"):
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need first.")
-                elif not _strict_autofill:
-                    st.info("Autofill helper not available; fill fields manually.")
-                else:
-                    with st.spinner("Analyzing need..."):
-                        kv = _strict_autofill(st.session_state.api_key, S["need_text"], S["req_type"]) or {}
-                    if S["req_type"] == "Functional":
-                        actor = _strip_vague(kv.get("Actor","")) or "The system"
-                        modal = (kv.get("ModalVerb","shall") or "shall").lower()
-                        action = _strip_vague(kv.get("Action",""))
-                        obj, perf = _strip_perf_from_object(_strip_vague(kv.get("Object","")), _strip_vague(kv.get("Performance","")))
-                        trig = _normalize_trigger(_strip_vague(kv.get("Trigger","")))
-                        cond = _push_need_context_to_conditions(_strip_vague(kv.get("Conditions","")), S["need_text"])
-                        S["Functional"].update({"actor":actor,"modal": modal if modal in ("shall","will","must") else "shall",
-                                                "action":action,"object":obj,"trigger":trig,"conditions":cond,"performance":perf})
-                    elif S["req_type"] == "Performance":
-                        S["Performance"].update({
-                            "function":_strip_vague(kv.get("Function","")),
-                            "metric":_strip_vague(kv.get("Metric","")),
-                            "threshold":_strip_vague(kv.get("Threshold","")),
-                            "unit":_strip_vague(kv.get("Unit","")),
-                            "conditions":_strip_vague(kv.get("Conditions","")),
-                            "measurement":_strip_vague(kv.get("Measurement","")),
-                            "verification": kv.get("VerificationMethod","Test") if kv.get("VerificationMethod") in ("Test","Analysis","Inspection","Demonstration") else "Test"
-                        })
-                    elif S["req_type"] == "Constraint":
-                        S["Constraint"].update({
-                            "subject":_strip_vague(kv.get("Subject","")),
-                            "constraint_text":_strip_vague(kv.get("ConstraintText","")),
-                            "driver":_strip_vague(kv.get("DriverOrStandard","")),
-                            "why": _strip_vague(kv.get("Rationale","")) or S["rationale"]
-                        })
-                    else:
-                        dr = kv.get("Direction","Bi-directional")
-                        S["Interface"].update({
-                            "system":_strip_vague(kv.get("System","")),
-                            "external":_strip_vague(kv.get("ExternalSystem","")),
-                            "standard":_strip_vague(kv.get("InterfaceStandard","")),
-                            "direction": dr if dr in ("In","Out","Bi-directional") else "Bi-directional",
-                            "data":_strip_vague(kv.get("DataItems","")),
-                            "perf":_strip_vague(kv.get("Performance","")),
-                            "conditions":_strip_vague(kv.get("Conditions",""))
-                        })
-                    if not S.get("preview_req"):
-                        S["preview_req"] = _build_req_preview()
-                    st.success("Autofilled. Review and refine below.")
-        with c_an[1]:
-            if st.button("↺ Clear Fields (this type)"):
-                if S["req_type"] == "Functional":
-                    S["Functional"] = {"actor":"", "modal":"shall", "action":"", "object":"", "trigger":"", "conditions":"", "performance":""}
-                elif S["req_type"] == "Performance":
-                    S["Performance"] = {"function":"", "metric":"", "threshold":"", "unit":"", "conditions":"", "measurement":"", "verification":"Test"}
-                elif S["req_type"] == "Constraint":
-                    S["Constraint"] = {"subject":"", "constraint_text":"", "driver":"", "why":""}
-                else:
-                    S["Interface"] = {"system":"", "external":"", "standard":"", "direction":"Bi-directional", "data":"", "perf":"", "conditions":""}
-                st.info(f"{S['req_type']} fields cleared.")
-
-        # Fields (type-specific)
-        st.subheader("Structured Fields")
-        if S["req_type"] == "Functional":
-            F = S["Functional"]
-            c1, c2 = st.columns(2)
-            with c1:
-                F["actor"] = st.text_input("Actor / System", value=F["actor"], key="fun_actor")
-                F["modal"] = st.selectbox("Modal Verb", ["shall","will","must"], index=["shall","will","must"].index(F["modal"]) if F["modal"] in ["shall","will","must"] else 0, key="fun_modal")
-                F["action"] = st.text_input("Action / Verb", value=F["action"], key="fun_action")
-                F["object"] = st.text_input("Object", value=F["object"], key="fun_object")
-            with c2:
-                F["trigger"] = st.text_input("Trigger / Event (optional)", value=F["trigger"], key="fun_trigger")
-                F["conditions"] = st.text_input("Operating Conditions / State (optional)", value=F["conditions"], key="fun_cond")
-                F["performance"] = st.text_input("Performance / Constraint (optional, measurable)", value=F["performance"], key="fun_perf")
-        elif S["req_type"] == "Performance":
-            P = S["Performance"]
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                P["function"] = st.text_input("Function (what is measured)", value=P["function"], key="perf_func")
-                P["metric"] = st.text_input("Metric (e.g., latency, accuracy)", value=P["metric"], key="perf_metric")
-            with c2:
-                P["threshold"] = st.text_input("Threshold (number)", value=P["threshold"], key="perf_threshold")
-                P["unit"] = st.text_input("Unit", value=P["unit"], key="perf_unit")
-            with c3:
-                P["conditions"] = st.text_input("Conditions / State", value=P["conditions"], key="perf_cond")
-                P["measurement"] = st.text_input("Measurement Method", value=P["measurement"], key="perf_measure")
-                P["verification"] = st.selectbox("Verification Method", ["Test","Analysis","Inspection","Demonstration"],
-                                                 index=["Test","Analysis","Inspection","Demonstration"].index(P["verification"]),
-                                                 key="perf_verif")
-        elif S["req_type"] == "Constraint":
-            C = S["Constraint"]
-            c1, c2 = st.columns(2)
-            with c1:
-                C["subject"] = st.text_input("Subject (system/subsystem/component)", value=C["subject"], key="con_subject")
-                C["constraint_text"] = st.text_input("Constraint (what must hold true)", value=C["constraint_text"], key="con_text")
-            with c2:
-                C["driver"] = st.text_input("Driver / Standard / Policy", value=C["driver"], key="con_driver")
-                C["why"] = st.text_input("Rationale (optional)", value=C["why"], key="con_why")
-        else:
-            I = S["Interface"]
-            c1, c2 = st.columns(2)
-            with c1:
-                I["system"] = st.text_input("This System", value=I["system"], key="if_sys")
-                I["external"] = st.text_input("External System", value=I["external"], key="if_ext")
-                I["standard"] = st.text_input("Interface Standard / Protocol", value=I["standard"], key="if_std")
-            with c2:
-                I["direction"] = st.selectbox("Direction", ["In","Out","Bi-directional"],
-                                              index=["In","Out","Bi-directional"].index(I["direction"]), key="if_dir")
-                I["data"] = st.text_input("Data Items / Messages", value=I["data"], key="if_data")
-                I["perf"] = st.text_input("Performance (e.g., latency/throughput)", value=I["perf"], key="if_perf")
-            I["conditions"] = st.text_input("Conditions / Modes (optional)", value=I["conditions"], key="if_cond")
-
-    # ---------- Previews & Quality (always shown) ----------
-    st.subheader("Previews & Quality")
-    left, right = st.columns(2)
-    with left:
-        st.markdown("**Need Preview (no 'shall')**")
-        st.markdown(f"> {_need_preview()}")
-
-    with right:
-        st.markdown("**Requirement Preview (editable)**")
-        S["preview_req"] = st.text_area(
-            "Edit the requirement preview before sending to Final",
-            value=S["preview_req"] or _build_req_preview(),
-            height=90,
-            key="preview_req_edit_area"
-        )
-        if st.button("Rebuild Preview from Fields"):
-            S["preview_req"] = _build_req_preview()
-            st.info("Preview rebuilt from the structured fields.")
-
+    # ---------- Helpers ----------
+    def _qc(text: str):
         try:
-            amb = safe_call_ambiguity(S["preview_req"], _get_rule_engine())
+            amb = safe_call_ambiguity(text, rule_engine)
         except TypeError:
-            amb = safe_call_ambiguity(S["preview_req"], None)
+            amb = safe_call_ambiguity(text, None)
         except Exception:
             amb = []
-        pas = check_passive_voice(S["preview_req"])
-        inc = check_incompleteness(S["preview_req"])
-        sing = check_singularity(S["preview_req"])
-        qc = st.columns(4)
-        qc[0].write(("✅" if not amb else "⚠️") + " Unambiguous")
-        qc[1].write(("✅" if not pas else "⚠️") + " Active Voice")
-        qc[2].write(("✅" if not inc else "⚠️") + " Complete")
-        qc[3].write(("✅" if not sing else "⚠️") + " Singular")
-        if amb: st.caption(f"Ambiguous terms: {', '.join(amb)}")
-        if pas: st.caption(f"Passive voice: {', '.join(pas)}")
-        if sing: st.caption(f"Multiple actions: {', '.join(sing)}")
+        pas = check_passive_voice(text)
+        inc = check_incompleteness(text)
+        sing = check_singularity(text)
+        return amb, pas, inc, sing
 
-    # ---------- Final Requirement ----------
-    st.subheader("Final Requirement")
-    cols_fr = st.columns([1,1])
-    with cols_fr[0]:
-        if st.button("Load Preview → Final"):
-            S["final_req"] = (S["preview_req"] or "").strip()
-            st.success("Loaded preview into Final.")
-    with cols_fr[1]:
-        if st.button("🤖 Review & Generate AC (Final)"):
-            if not st.session_state.api_key:
-                st.warning("Enter your Google AI API Key.")
-            elif not S.get("final_req","").strip():
-                st.error("Enter or load a Final requirement first.")
-            else:
-                prompt = f"""
-Act as a systems engineering reviewer. Provide a short critique and 3–6 testable acceptance criteria (each includes setup/conditions, threshold(s), and verification: Test/Analysis/Inspection/Demonstration).
+    def _badge_row(text: str) -> str:
+        amb, pas, inc, sing = _qc(text)
+        def mark(ok, label): return ("✅ " if ok else "⚠️ ") + label
+        return f"{mark(not amb,'Unambiguous')}  {mark(not pas,'Active Voice')}  {mark(not inc,'Complete')}  {mark(not sing,'Singular')}"
 
-REQUIREMENT:
-\"\"\"{S['final_req'].strip()}\"\"\""""
-                raw = get_ai_suggestion(st.session_state.api_key, prompt) or ""
-                S["last_ai_raw"] = raw
-                bullets = []
-                for ln in raw.splitlines():
-                    if re.match(r'^\s*[-*•]\s+', ln):
-                        bullets.append(re.sub(r'^\s*[-*•]\s+', '', ln).strip())
-                if bullets:
-                    S["final_ac"] = bullets
-                    st.success("Acceptance Criteria generated below.")
-                else:
-                    st.info("No bullets detected. See raw output under the expander below.")
+    def _next_child_id(parent_id: str) -> str:
+        S["child_counts"].setdefault(parent_id, 1)
+        idx = S["child_counts"][parent_id]
+        S["child_counts"][parent_id] = idx + 1
+        return f"{parent_id}.{idx}"
 
-    S.setdefault("final_req", "")
-    S.setdefault("final_ac", [])
+    def _append_children_ids(base_parent: str, children_texts: list[str]) -> list[dict]:
+        rows = []
+        for txt in children_texts:
+            rows.append({
+                "ID": _next_child_id(base_parent),
+                "ParentID": base_parent,
+                "Text": txt,
+                "Role": "Child",
+                "Verification": "Test",
+                "VerificationLevel": "Subsystem",
+                "VerificationEvidence": "",
+                "ValidationNeedID": S.get("need_id", "NEED-001"),
+                "TestCaseIDs": "",
+                "AllocatedTo": "",
+                "Criticality": "Medium",
+                "Status": "Draft"
+            })
+        return rows
 
-    S["final_req"] = st.text_area("Final Requirement (single sentence, uses 'shall')",
-                                  value=S["final_req"], height=90, key="final_req_edit")
+    # ---------- AI Generators ----------
+    def _ai_questions(need: str, req_type: str) -> list[str]:
+        dom = _detect_domain(need)
+        if st.session_state.get("api_key"):
+            prompt = f"""
+You are a senior systems engineer.
+From the NEED below, write 6–8 concise, domain-specific clarifying questions with a short example after “→ e.g.,”.
 
-    # ---------- Acceptance Criteria ----------
-    st.subheader("Acceptance Criteria")
-    ac_text = "\n".join(S.get("final_ac", []))
-    new_ac_text = st.text_area("One bullet per line", value=ac_text, height=130, key="need_ac_edit")
-    S["final_ac"] = [ln.strip() for ln in new_ac_text.splitlines() if ln.strip()]
-
-    # ---------- ID & Role for Final Requirement ----------
-    st.subheader("ID & Role for Final Requirement")
-    idrow = st.columns([1,1,1,1])
-    with idrow[0]:
-        S["final_id"] = st.text_input("Final Requirement ID", value=S.get("final_id",""), placeholder="e.g., REQ-001", key="final_req_id")
-    with idrow[1]:
-        S["final_role"] = st.radio("Role", ["Parent","Child"],
-                                   index=["Parent","Child"].index(S.get("final_role","Parent")), horizontal=True, key="final_role_radio")
-    with idrow[2]:
-        if S["final_role"] == "Child":
-            S["final_parent_id"] = st.text_input("Parent ID", value=S.get("final_parent_id",""), placeholder="e.g., REQ-000", key="final_parent_id")
-        else:
-            st.caption("Parent role: no parent ID needed.")
-    with idrow[3]:
-        if S["final_role"] == "Child" and (S.get("final_parent_id","").strip()):
-            if st.button("Generate Next Child ID"):
-                S["final_id"] = f"{S['final_parent_id'].strip()}.{int(S.get("child_next",1))}"
-                S["child_next"] = int(S.get("child_next",1)) + 1
-                st.success(f"Child: {S['final_id']}")
-
-    # ---------- Decomposition ----------
-    st.subheader("Decomposition")
-    st.caption("Choose a source and create a parent/children set. You can edit the parent text/ID and the child items, add or delete children.")
-
-    decomp_top = st.columns([1,1,2])
-    with decomp_top[0]:
-        S["decomp_source"] = st.selectbox("Decompose From", ["Need","Final Requirement"],
-                                          index=["Need","Final Requirement"].index(S["decomp_source"]),
-                                          key="decomp_source_sel")
-
-    def _parse_children_lines(text: str) -> list[str]:
-        out = []
-        for ln in (text or "").splitlines():
-            if re.match(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', ln):
-                out.append(re.sub(r'^(\d+[\.\)]\s+|\-\s+|\*\s+|•\s+)', '', ln).strip())
-        return [x for x in out if x]
-
-    def _ai_parent_and_children_from_need(api_key: str, need_text: str) -> tuple[str, list[str]]:
-        prompt = f"""
-You are a systems engineer. From the following stakeholder NEED, propose exactly:
-- PARENT: a single top-level requirement sentence (use 'shall'), covering the overall capability.
-- CHILDREN: 3–8 singular child requirements that decompose the parent, each testable.
-
-Return strictly in this format (no extra prose):
-PARENT: <one sentence>
-CHILDREN:
-- <child 1>
-- <child 2>
-- <child 3>
-- ...
+Rules:
+- Cover thresholds/units, modes/conditions, timing/power/budgets, environments/disturbances, verification, contingencies/faults, and domain specifics (e.g., thermal, UAS).
+- No bullets/numbering/prefix text. One line per question.
+- Format each line exactly like: Question? → e.g., short example.
 
 NEED:
-\"\"\"{(need_text or '').strip()}\"\"\""""
-        raw = get_ai_suggestion(api_key, prompt) or ""
-        parent = ""
-        m = re.search(r'(?im)^\s*PARENT\s*:\s*(.+)$', raw)
-        if m: parent = m.group(1).strip()
-        children = _parse_children_lines(raw.split("CHILDREN", 1)[-1] if "CHILDREN" in raw else raw)
-        return parent, children
+\"\"\"{need.strip()}\"\"\""""
+            raw = _llm_retry(lambda p: get_ai_suggestion(st.session_state.api_key, p), prompt)
+            if raw:
+                lines = [re.sub(r'^[\-\*\u2022]\s+', '', ln.strip()) for ln in raw.splitlines() if ln.strip()]
+                out = []
+                for ln in lines:
+                    out.append(ln if "→" in ln else (ln.rstrip("?") + "? → e.g., TBD."))
+                if len(out) >= 5:
+                    return out[:8]
+        if dom == "thermal":
+            return _thermal_questions_with_examples()
+        if dom == "uas":
+            return _uas_questions_with_examples()
+        return _generic_questions_with_examples()
 
-    with decomp_top[1]:
-        if st.button("🧩 Generate Decomposition"):
-            if S["decomp_source"] == "Final Requirement":
-                if not S.get("final_req","").strip():
-                    st.error("Enter or load a Final requirement first.")
-                else:
-                    parent_text = S["final_req"].strip()
-                    parent_id = (S.get("final_parent_id","").strip()
-                                 if S.get("final_role","Parent") == "Child" and S.get("final_parent_id","").strip()
-                                 else S.get("final_id","").strip())
-                    if not st.session_state.api_key:
-                        st.warning("Enter your Google AI API Key to generate children.")
-                    else:
-                        raw = decompose_requirement_with_ai(st.session_state.api_key, parent_text) or ""
-                        S["last_ai_raw"] = raw
-                        kids = _parse_children_lines(raw)
-                        rows = []
-                        base = parent_id or "REQ-000"
-                        for i, txt in enumerate(kids, start=1):
-                            rows.append({"ID": f"{base}.{i}", "ParentID": parent_id, "Requirement Text": txt})
-                        S["decomp_parent_text"] = parent_text
-                        S["decomp_parent_id"] = parent_id
-                        S["decomp_rows"] = rows
-                        S["scroll_to"] = "decomp"
-                        st.rerun()
+    def _ai_parent(need: str, rationale: str) -> str:
+        dom = _detect_domain(need)
+        if st.session_state.get("api_key"):
+            prompt = f"""
+Convert the NEED into ONE parent requirement:
+- singular, unambiguous, verifiable if applicable, 'shall', ≤ 22 words.
+- Avoid redefining architecture unless the NEED truly demands it.
+Return only the sentence.
+
+NEED: \"\"\"{need.strip()}\"\"\"\nRATIONALE: \"\"\"{(rationale or '').strip()}\"\"\""""
+            out = _llm_retry(lambda p: get_ai_suggestion(st.session_state.api_key, p), prompt)
+            if out:
+                return out.splitlines()[0].strip()
+        if dom == "thermal":
+            return _thermal_parent_from_need(need)
+        if dom == "uas":
+            return _uas_parent_from_need(need)
+        return _fallback_parent(need)
+
+    def _ai_children(parent_text: str, need_text: str) -> list[str]:
+        dom = _detect_domain(need_text or parent_text)
+        if st.session_state.get("api_key"):
+            prompt = f"""
+Produce 5–8 CHILD 'shall' requirements that decompose the goal implied by the text below.
+Rules:
+- ONE measurable metric per child; keep ≤ 22 words; no bullets/numbering.
+- Prefer explicit values from text; else use 'TBD_*' with a brief example in parentheses.
+- Include domain-typical children (e.g., ranges/time-at-limit/power budgets for thermal; endurance/link/geo-fence/safety for UAS).
+
+TEXT:
+\"\"\"{(parent_text or need_text).strip()}\"\"\""""
+            raw = _llm_retry(lambda p: get_ai_suggestion(st.session_state.api_key, p), prompt)
+            if raw:
+                kids = [re.sub(r'^[\-\*\u2022]\s+', '', ln.strip()) for ln in raw.splitlines() if len(ln.strip().split()) > 3]
+                if len(kids) >= 3:
+                    return kids[:8]
+        if dom == "thermal":
+            return _thermal_children_default()
+        if dom == "uas":
+            return _uas_children_default()
+        return _fallback_children()
+
+    def _ai_rewrite_strict(text: str) -> str:
+        if not st.session_state.get("api_key"):
+            return text
+        prompt = f"Rewrite as ONE singular, unambiguous, verifiable requirement using 'shall', ≤ 22 words. Return only the sentence.\n\n\"\"\"{text.strip()}\"\"\""
+        out = _llm_retry(lambda p: get_ai_suggestion(st.session_state.api_key, p), prompt)
+        return (out.splitlines()[0].strip() if out else text)
+
+    # ---------- Generate (one click) ----------
+    st.subheader("❓ Gaps & Clarifying Questions")
+    cols_q = st.columns([1.4, 2.6])
+    with cols_q[0]:
+        if st.button("🔎 Generate Questions & Requirements"):
+            need_clean = _normalize_need(S["need_text"])
+            if not need_clean.strip():
+                st.error("Enter the stakeholder need first.")
             else:
-                if not st.session_state.api_key:
-                    st.warning("Enter your Google AI API Key.")
-                elif not S["need_text"].strip():
-                    st.error("Please enter the stakeholder need first.")
+                with st.spinner("Thinking like a systems engineer…"):
+                    S["ai_questions"] = _ai_questions(need_clean, S["req_type"])
+                    parent_txt = _ai_parent(need_clean, S["rationale"])
+
+                    dom = _detect_domain(need_clean)
+                    looks_multi = bool(check_singularity(parent_txt)) or bool(re.search(r"\b(and|;|,)\b", parent_txt))
+                    force_children = dom in ("thermal", "uas") or "within" in parent_txt.lower() or "maintain" in parent_txt.lower()
+                    children_txt = _ai_children(parent_txt, need_clean) if (looks_multi or force_children) else []
+
+                    reqs = []
+
+                    # --- New: choose structure ---
+                    # For domain thermal/UAS -> keep Parent + Children.
+                    # For generic: if we have >3 children and parent looks too generic, create a GROUP of standalone reqs (no parent).
+                    parent_too_generic = dom == "generic" and re.search(r"\b(achieve|provide|ensure|support)\b", parent_txt.lower()) and len(children_txt) >= 4
+
+                    if parent_too_generic:
+                        # Group of standalone requirements (Role: Standalone, no ParentID)
+                        for i, t in enumerate(children_txt, start=1):
+                            reqs.append({
+                                "ID": f"REQ-{i:03d}",
+                                "ParentID": "",
+                                "Text": t,
+                                "Role": "Standalone",
+                                "Verification": "Test",
+                                "VerificationLevel": "Subsystem",
+                                "VerificationEvidence": "",
+                                "ValidationNeedID": S.get("need_id", "NEED-001"),
+                                "TestCaseIDs": "",
+                                "AllocatedTo": "",
+                                "Criticality": "Medium",
+                                "Status": "Draft"
+                            })
+                    else:
+                        if parent_txt:
+                            parent_id = "REQ-001"
+                            reqs.append({
+                                "ID": parent_id,
+                                "ParentID": "",
+                                "Text": parent_txt,
+                                "Role": "Parent",
+                                "Verification": "Test",
+                                "VerificationLevel": "System",
+                                "VerificationEvidence": "",
+                                "ValidationNeedID": S.get("need_id", "NEED-001"),
+                                "TestCaseIDs": "",
+                                "AllocatedTo": "",
+                                "Criticality": "Medium",
+                                "Status": "Draft"
+                            })
+                            S["child_counts"][parent_id] = 1
+                            if children_txt:
+                                reqs.extend(_append_children_ids(parent_id, children_txt))
+
+                    S["requirements"] = reqs
+                st.success("Questions and requirements generated.")
+                _rerun()
+    with cols_q[1]:
+        if not S.get("ai_questions"):
+            st.caption("No questions yet. Click **Generate Questions & Requirements**.")
+        else:
+            for i, q in enumerate(S["ai_questions"], start=1):
+                st.markdown(f"{i}. {q}")
+
+    # ---------- Requirements (cards) ----------
+    st.subheader("🧱 Requirements")
+    reqs = list(S.get("requirements", []))
+    if not reqs:
+        st.caption("No requirements yet. Use **Generate Questions & Requirements**.")
+    else:
+        for idx, req in enumerate(reqs):
+            rid, role = req["ID"], req["Role"]
+            text = req.get("Text", "")
+            # ensure defaults
+            req.setdefault("Verification", req.get("Verification", "Test"))
+            req.setdefault("VerificationLevel", req.get("VerificationLevel", "Subsystem"))
+            req.setdefault("VerificationEvidence", req.get("VerificationEvidence", ""))
+            req.setdefault("ValidationNeedID", req.get("ValidationNeedID", S.get("need_id", "NEED-001")))
+            req.setdefault("TestCaseIDs", req.get("TestCaseIDs", ""))
+            req.setdefault("AllocatedTo", req.get("AllocatedTo", ""))
+            req.setdefault("Criticality", req.get("Criticality", "Medium"))
+            req.setdefault("Status", req.get("Status", "Draft"))
+
+            border = "1px solid #94a3b8" if role == "Parent" else "1px solid #e2e8f0"
+            st.markdown(f"<div style='border:{border};border-radius:10px;padding:12px;margin-bottom:10px;'>", unsafe_allow_html=True)
+
+            # Header + ID + Text
+            title = "Parent" if role == "Parent" else ("Child" if role == "Child" else "Requirement")
+            st.markdown(f"**{title}**")
+            top = st.columns([0.20, 0.80])
+            with top[0]:
+                new_id = st.text_input("ID", value=rid, key=f"id_{rid}")
+                if new_id and new_id != rid:
+                    prefix_old = rid + "."
+                    prefix_new = new_id + "."
+                    for j, r2 in enumerate(S["requirements"]):
+                        if r2["ID"] == rid:
+                            S["requirements"][j]["ID"] = new_id
+                            if r2["Role"] == "Parent":
+                                if rid in S["child_counts"] and new_id not in S["child_counts"]:
+                                    S["child_counts"][new_id] = S["child_counts"].pop(rid)
+                        elif r2.get("ParentID") == rid:
+                            S["requirements"][j]["ParentID"] = new_id
+                        if r2["ID"].startswith(prefix_old):
+                            S["requirements"][j]["ID"] = prefix_new + r2["ID"][len(prefix_old):]
+                    _rerun()
+            with top[1]:
+                new_text = st.text_input("Requirement", value=text, key=f"text_{rid}")
+                if new_text != text:
+                    S["requirements"][idx]["Text"] = new_text
+
+            # Tools row (Rewrite always; Decompose only for non-singular)
+            tools = st.columns([0.18, 0.18, 0.18, 0.46])
+            with tools[0]:
+                if st.button("🪄 Rewrite", key=f"rw_{rid}"):
+                    S["requirements"][idx]["Text"] = _ai_rewrite_strict(S["requirements"][idx]["Text"])
+                    _rerun()
+
+            # Only show Decompose if not singular AND role is Parent or Standalone (children can also be decomposed, but we keep your rule set simple)
+            _, _, _, sing_issues = _qc(S["requirements"][idx]["Text"])
+            show_decompose = bool(sing_issues)
+
+            with tools[1]:
+                if show_decompose:
+                    if st.button("🧩 Decompose", key=f"dc_{rid}"):
+                        base_parent = S["requirements"][idx]["ID"]
+                        if st.session_state.get("api_key"):
+                            raw = _llm_retry(lambda _: decompose_requirement_with_ai(st.session_state.api_key, S["requirements"][idx]["Text"]), "DECOMPOSE")
+                            kids_txt = [re.sub(r'^[\-\*\u2022]?\s*', '', ln.strip()) for ln in (raw or "").splitlines() if re.search(r'\w', ln)]
+                            kids_txt = [k for k in kids_txt if len(k.split()) > 3]
+                        else:
+                            parts = [p.strip(" ,.;") for p in re.split(r"\band\b|;", S["requirements"][idx]["Text"], flags=re.I) if p.strip()]
+                            kids_txt = [p for p in parts if len(p.split()) > 3]
+                        if kids_txt:
+                            # If the current item is Standalone (group), convert it into a Parent to host children
+                            if S["requirements"][idx]["Role"] == "Standalone":
+                                S["requirements"][idx]["Role"] = "Parent"
+                                S["child_counts"][base_parent] = 1
+                            S["child_counts"].setdefault(base_parent, 1)
+                            children = _append_children_ids(base_parent, kids_txt)
+                            S["requirements"][idx+1:idx+1] = children
+                            st.success(f"Decomposed into {len(children)} child requirement(s).")
+                            _rerun()
+                        else:
+                            st.info("No decomposable actions detected.")
                 else:
-                    with st.spinner("Creating parent and children…"):
-                        ptxt, kids = _ai_parent_and_children_from_need(st.session_state.api_key, S["need_text"])
-                    S["decomp_parent_text"] = (ptxt or "").strip()
-                    S["decomp_parent_id"] = S.get("final_id","").strip()
-                    rows = []
-                    base = S["decomp_parent_id"] or "REQ-000"
-                    for i, txt in enumerate(kids, start=1):
-                        rows.append({"ID": f"{base}.{i}", "ParentID": S["decomp_parent_id"], "Requirement Text": txt})
-                    S["decomp_rows"] = rows
-                    S["scroll_to"] = "decomp"
-                    st.rerun()
+                    st.write("")
 
-    # ---- Editable Parent (for decomposition) ----
-    st.markdown("<div id='decomp_section'></div>", unsafe_allow_html=True)
-    if S["decomp_parent_text"] or S["decomp_rows"]:
-        st.markdown("**Decomposition Parent**")
-        dpc1, dpc2 = st.columns([3,1])
-        with dpc1:
-            S["decomp_parent_text"] = st.text_input("Parent Requirement (editable)",
-                                                    value=S["decomp_parent_text"], key="decomp_parent_text_edit")
-        with dpc2:
-            S["decomp_parent_id"] = st.text_input("Parent ID (editable)",
-                                                  value=S["decomp_parent_id"], placeholder="e.g., REQ-010",
-                                                  key="decomp_parent_id_edit")
+            with tools[2]:
+                if st.button("🗑️ Delete", key=f"del_{rid}"):
+                    pref = rid + "."
+                    S["requirements"] = [r for r in S["requirements"] if not (r["ID"] == rid or r["ID"].startswith(pref))]
+                    _rerun()
+            with tools[3]:
+                st.caption("")
 
-    # ---- Editable Children table ----
-    if S.get("decomp_rows"):
-        st.markdown("**Children (edit / add / delete)**")
-        parent_id = (S.get("decomp_parent_id","") or "").strip()
-        new_rows = []
-        for idx, row in enumerate(S["decomp_rows"], start=1):
-            cols = st.columns([0.07, 0.63, 0.20, 0.10])
-            with cols[0]:
-                st.write(f"{idx}.")
-            with cols[1]:
-                txt = st.text_input("Child Requirement", value=row.get("Requirement Text",""), key=f"decomp_child_txt_{idx}")
-            with cols[2]:
-                cid = st.text_input("Child ID", value=row.get("ID",""), key=f"decomp_child_id_{idx}")
-            with cols[3]:
-                if st.button("🗑️", key=f"decomp_child_del_{idx}"):
-                    S["decomp_rows"].pop(idx-1)
-                    st.rerun()
-            new_rows.append({"Requirement Text": txt, "ID": cid})
+            # Structured edit (dropdowns / with custom)
+            with st.expander("Structured edit (dropdowns / with custom)"):
+                def _sel_or_custom(label, options, ksel, kcust, initial=""):
+                    preset = initial if initial in options else (options[0] if options else "")
+                    sel = st.selectbox(label, options + ["Custom…"],
+                                       index=(options + ["Custom…"]).index(preset) if preset in options else len(options),
+                                       key=ksel)
+                    if sel == "Custom…":
+                        return st.text_input(f"{label} (custom)", value=initial if (initial and initial not in options) else "",
+                                             key=kcust)
+                    return sel
 
-        rows_persist = []
-        for r in new_rows:
-            rows_persist.append({"ID": r["ID"] or "", "ParentID": parent_id, "Requirement Text": r["Requirement Text"]})
-        S["decomp_rows"] = rows_persist
+                txt_now = S["requirements"][idx]["Text"]
+                actor_guess = "System"
+                if re.search(r"\b(payload|optics)\b", txt_now, re.I): actor_guess = "Payload"
+                if re.search(r"\bbattery|batteries\b", txt_now, re.I): actor_guess = "Power Subsystem"
+                if re.search(r"\bthermal|heater|temperature|radiator\b", txt_now, re.I): actor_guess = "Thermal Control Subsystem"
+                if re.search(r"\buav|uas|drone|gcs\b", txt_now, re.I): actor_guess = "UAV"
 
-        btns = st.columns([1,1,2])
-        with btns[0]:
-            if st.button("➕ Add Child"):
-                base = parent_id or "REQ-000"
-                next_idx = len(S["decomp_rows"]) + 1
-                S["decomp_rows"].append({"ID": f"{base}.{next_idx}", "ParentID": parent_id, "Requirement Text":"New child requirement"})
-                st.rerun()
-        with btns[1]:
-            if st.button("🔢 Renumber Children"):
-                base = parent_id or "REQ-000"
-                ren = []
-                for i, r in enumerate(S["decomp_rows"], start=1):
-                    ren.append({"ID": f"{base}.{i}", "ParentID": parent_id, "Requirement Text": r["Requirement Text"]})
-                S["decomp_rows"] = ren
-                st.success("Children renumbered.")
+                action_guess = "maintain" if re.search(r"\bmaintain|hold\b", txt_now, re.I) else ("regulate" if re.search(r"\bregulat", txt_now, re.I) else "achieve")
+                object_guess = "temperatures" if re.search(r"\btemp|thermal\b", txt_now, re.I) else ("mission performance" if re.search(r"\buav|uas|drone|gcs\b", txt_now, re.I) else "function")
+                trigger_guess = "during all mission phases" if re.search(r"\bmission\b", txt_now, re.I) else ""
+                conditions_guess = "in eclipse and full sun" if re.search(r"\beclipse|sun\b", txt_now, re.I) else ("in nominal conditions" if re.search(r"\buav|uas|drone|gcs\b", txt_now, re.I) else "in nominal mode")
 
-        df = pd.DataFrame(S["decomp_rows"])
-        st.download_button("Download Decomposition (CSV)",
-                           df.to_csv(index=False).encode("utf-8"),
-                           file_name="Decomposition.csv",
-                           mime="text/csv",
-                           key="dl_decomp_csv")
+                c1, c2 = st.columns(2)
+                with c1:
+                    actor = _sel_or_custom("Actor / System",
+                                           ["System", "Thermal Control Subsystem", "Power Subsystem", "Payload", "Spacecraft", "UAV"],
+                                           f"{rid}_actor_sel", f"{rid}_actor_custom", actor_guess)
+                    modal = st.selectbox("Modal Verb", ["shall", "will", "must"], index=0, key=f"{rid}_modal")
+                    action = _sel_or_custom("Action / Verb",
+                                            ["maintain", "regulate", "limit", "detect", "log", "achieve", "provide", "enforce"],
+                                            f"{rid}_action_sel", f"{rid}_action_custom", action_guess)
+                    obj = _sel_or_custom("Object",
+                                         ["temperatures", "payload optics temperature", "battery temperatures", "avionics temperatures", "mission performance", "function"],
+                                         f"{rid}_object_sel", f"{rid}_object_custom", object_guess)
+                with c2:
+                    trigger = _sel_or_custom("Trigger / Event (optional)",
+                                             ["during all mission phases", "during eclipse", "during active imaging", "when commanded", "during flight operations", ""],
+                                             f"{rid}_trigger_sel", f"{rid}_trigger_custom", trigger_guess)
+                    conditions = _sel_or_custom("Operating Conditions / State (optional)",
+                                                ["in eclipse and full sun", "in nominal mode", "in safe mode", "in nominal conditions", ""],
+                                                f"{rid}_cond_sel", f"{rid}_cond_custom", conditions_guess)
+                    perf = st.text_input("Performance / Constraint (optional, measurable)",
+                                         value="", placeholder="e.g., 0–40 °C; ±2 °C of T_nom; ≥45 min endurance; ≤200 ms latency",
+                                         key=f"{rid}_perf")
 
+                def _norm_trig(t: str) -> str:
+                    t = t.strip()
+                    if not t:
+                        return ""
+                    return t if re.match(r'^(when|if|while|during)\b', t, flags=re.I) else f"during {t}"
+
+                trig_part = (_norm_trig(trigger) + ", ") if trigger.strip() else ""
+                tail_perf = f" {perf.strip()}" if perf.strip() else ""
+                tail_cond = f" {conditions.strip()}" if conditions.strip() else ""
+                rebuilt = f"{trig_part}{actor} {modal} {action} {obj}{tail_perf}{tail_cond}".strip()
+                if not rebuilt.endswith("."):
+                    rebuilt += "."
+                rebuilt = re.sub(r"\s{2,}", " ", rebuilt)
+                if st.button("Apply structured edit", key=f"apply_{rid}"):
+                    S["requirements"][idx]["Text"] = rebuilt
+                    _rerun()
+
+            # Inline V&V + traceability rows
+            row_vv1 = st.columns([0.26, 0.26, 0.24, 0.24])
+            with row_vv1[0]:
+                ver_options = ["Test", "Analysis", "Inspection", "Demo"]
+                cur = S["requirements"][idx].get("Verification", "Test")
+                sel = st.selectbox("Verification Method", ver_options, index=ver_options.index(cur) if cur in ver_options else 0, key=f"{rid}_verif")
+                if sel != cur:
+                    S["requirements"][idx]["Verification"] = sel
+            with row_vv1[1]:
+                lvl_opts = ["Unit", "Subsystem", "System", "Mission"]
+                cur = S["requirements"][idx].get("VerificationLevel", "Subsystem")
+                sel = st.selectbox("Verification Level", lvl_opts, index=lvl_opts.index(cur) if cur in lvl_opts else 1, key=f"{rid}_verlvl")
+                if sel != cur:
+                    S["requirements"][idx]["VerificationLevel"] = sel
+            with row_vv1[2]:
+                cur = S["requirements"][idx].get("ValidationNeedID", S.get("need_id", "NEED-001"))
+                val = st.text_input("Validation Need ID", value=cur, key=f"{rid}_valneed")
+                if val != cur:
+                    S["requirements"][idx]["ValidationNeedID"] = val
+            with row_vv1[3]:
+                cur = S["requirements"][idx].get("AllocatedTo", "")
+                val = st.text_input(
+                    "Allocated To",
+                    value=cur,
+                    key=f"{rid}_alloc",
+                    placeholder="e.g., Thermal Subsystem / Mobile App / Backend Service / Flight Software"
+                )
+                if val != cur:
+                    S["requirements"][idx]["AllocatedTo"] = val
+
+
+            row_vv2 = st.columns([0.50, 0.25, 0.25])
+            with row_vv2[0]:
+                cur = S["requirements"][idx].get("VerificationEvidence", "")
+                val = st.text_input("Verification Evidence (link/ID)", value=cur, key=f"{rid}_verevid")
+                if val != cur:
+                    S["requirements"][idx]["VerificationEvidence"] = val
+            with row_vv2[1]:
+                cur = S["requirements"][idx].get("TestCaseIDs", "")
+                val = st.text_input("Test Case ID(s)", value=cur, key=f"{rid}_tcids", placeholder="e.g., TVAC-OPT-02; T-123")
+                if val != cur:
+                    S["requirements"][idx]["TestCaseIDs"] = val
+            with row_vv2[2]:
+                crit_options = ["High", "Medium", "Low"]
+                cur_crit = S["requirements"][idx].get("Criticality", "Medium")
+                sel_crit = st.selectbox("Criticality", crit_options, index=crit_options.index(cur_crit) if cur_crit in crit_options else 1, key=f"{rid}_crit")
+                if sel_crit != cur_crit:
+                    S["requirements"][idx]["Criticality"] = sel_crit
+
+            row_status = st.columns([1.0])
+            with row_status[0]:
+                status_options = ["Draft", "Reviewed", "Approved"]
+                cur_status = S["requirements"][idx].get("Status", "Draft")
+                sel_status = st.selectbox("Status", status_options, index=status_options.index(cur_status) if cur_status in status_options else 0, key=f"{rid}_status")
+                if sel_status != cur_status:
+                    S["requirements"][idx]["Status"] = sel_status
+
+            # Quality badges
+            st.markdown(_badge_row(S["requirements"][idx]["Text"]))
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---------- Export ----------
+    st.subheader("⬇️ Export Requirements (CSV)")
+    if not S.get("requirements"):
+        st.info("No requirements to export yet.")
     else:
-        st.info("Use **🧩 Generate Decomposition** to create a parent and children set from the Need or from the Final requirement.")
-
-    # ---------- Raw AI output (optional) ----------
-    if S.get("last_ai_raw"):
-        with st.expander("Show last AI output (raw)"):
-            st.code(S["last_ai_raw"])
-
-    # ---------- Smooth scroll ----------
-    if S.get("scroll_to") == "decomp":
-        components.html("""
-            <script>
-              const el = document.getElementById('decomp_section');
-              if (el) { el.scrollIntoView({behavior: 'smooth', block: 'start'}); }
-            </script>
-        """, height=0)
-        S["scroll_to"] = ""
-
-    # =========================
-    # Professional CSV Export
-    # =========================
-    st.subheader("Export Requirements (Professional CSV)")
-
-    def _g(val, default=""):  # safe get
-        return (val or default).strip() if isinstance(val, str) else (val if val is not None else default)
-
-    # Decide the "parent" row for export
-    parent_text = _g(S.get("decomp_parent_text")) or _g(S.get("final_req")) or _g(S.get("preview_req"))
-    parent_id   = _g(S.get("decomp_parent_id"))   or _g(S.get("final_id"))
-    role        = S.get("final_role","Parent")
-    src         = S.get("decomp_source","Need")  # "Need" or "Final Requirement"
-    req_type    = S.get("req_type","Functional")
-    priority    = S.get("priority","Should")
-    lifecycle   = S.get("lifecycle","Operations")
-    stakeholder = S.get("stakeholder","")
-    rationale   = _g(S.get("rationale"))
-    verification = ""
-    if req_type == "Performance":
-        verification = S.get("Performance",{}).get("verification","") or ""
-
-    # Acceptance criteria (only for the parent/final)
-    ac_joined = " | ".join(S.get("final_ac", [])) if S.get("final_ac") else ""
-
-    rows = []
-
-    # Parent row
-    if parent_text or parent_id:
-        rows.append({
-            "ID": parent_id,
-            "ParentID": "",
-            "Requirement Text": parent_text,
-            "Type": req_type,
-            "Role": "Parent" if role == "Parent" or not parent_id else role,
-            "Priority": priority,
-            "Lifecycle": lifecycle,
-            "Stakeholder": stakeholder,
-            "Source": src,  # Need / Final Requirement
-            "Verification": verification,
-            "Acceptance Criteria": ac_joined,
-            "Rationale": rationale
-        })
-
-    # Child rows from decomposition
-    for child in (S.get("decomp_rows") or []):
-        rows.append({
-            "ID": _g(child.get("ID")),
-            "ParentID": _g(child.get("ParentID") or parent_id),
-            "Requirement Text": _g(child.get("Requirement Text")),
-            "Type": req_type,
-            "Role": "Child",
-            "Priority": priority,
-            "Lifecycle": lifecycle,
-            "Stakeholder": stakeholder,
-            "Source": src,
-            "Verification": "",
-            "Acceptance Criteria": "",
-            "Rationale": rationale
-        })
-
-    if not rows:
-        st.info("No requirements to export yet. Enter a Final or Decomposition first.")
-    else:
+        rows = []
+        for r in S["requirements"]:
+            rows.append({
+                "Need ID": S.get("need_id", "NEED-001"),
+                "Validation Need ID": r.get("ValidationNeedID", S.get("need_id", "NEED-001")),
+                "ID": r["ID"],
+                "ParentID": r["ParentID"],
+                "Requirement Text": r["Text"],
+                "Type": S.get("req_type", "Functional"),
+                "Role": r["Role"],
+                "Priority": S.get("priority", "Should"),
+                "Lifecycle": S.get("lifecycle", "Operations"),
+                "Stakeholder": S.get("stakeholder", ""),
+                "Source": "Need",
+                "Verification": r.get("Verification", ""),
+                "Verification Level": r.get("VerificationLevel", ""),
+                "Verification Evidence": r.get("VerificationEvidence", ""),
+                "Test Case IDs": r.get("TestCaseIDs", ""),
+                "Allocated To": r.get("AllocatedTo", ""),
+                "Criticality": r.get("Criticality", ""),
+                "Status": r.get("Status", ""),
+                "Acceptance Criteria": "",
+                "Rationale": S.get("rationale", "")
+            })
         df_pro = pd.DataFrame(rows, columns=[
-            "ID","ParentID","Requirement Text","Type","Role","Priority","Lifecycle","Stakeholder",
-            "Source","Verification","Acceptance Criteria","Rationale"
+            "Need ID", "Validation Need ID", "ID", "ParentID", "Requirement Text", "Type", "Role",
+            "Priority", "Lifecycle", "Stakeholder", "Source",
+            "Verification", "Verification Level", "Verification Evidence",
+            "Test Case IDs", "Allocated To", "Criticality", "Status",
+            "Acceptance Criteria", "Rationale"
         ])
         st.download_button(
-            "⬇️ Download Requirements (CSV)",
+            "Download CSV",
             data=df_pro.to_csv(index=False).encode("utf-8"),
             file_name="Requirements_Export.csv",
             mime="text/csv",
