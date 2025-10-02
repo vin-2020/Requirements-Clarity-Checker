@@ -15,7 +15,7 @@ def render(st, db, rule_engine, CTX):
       - rule_engine: RuleEngine instance (or stub)
       - CTX: dict of helpers injected from app.py
     """
-    # pull helpers from CTX (exact same logic as before)
+    # ---- CTX helpers ---------------------------------------------------------
     HAS_AI_PARSER = CTX.get("HAS_AI_PARSER", False)
     get_ai_suggestion = CTX["get_ai_suggestion"]
     decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
@@ -36,7 +36,137 @@ def render(st, db, rule_engine, CTX):
 
     _save_uploaded_file_for_doc = CTX["_save_uploaded_file_for_doc"]
 
-    # ------------------------------ Tab: Analyzer (Unified) ------------------------------
+    # ---- Hardening for flaky AI calls (retry, truncate, swallow 500s) --------
+    import time
+    _orig_get_ai_suggestion = get_ai_suggestion  # keep original
+
+    def get_ai_suggestion(api_key: str, prompt: str, * ,
+                          max_chars: int = 6000,
+                          retries: int = 2,
+                          backoff_base: float = 0.6):
+        """
+        Wrapper around CTX['get_ai_suggestion'] that:
+          - truncates overly long prompts (helps avoid server 500s)
+          - retries on transient 5xx/429
+          - never raises (returns "" on failure)
+        """
+        if not api_key:
+            return ""
+        safe_prompt = (prompt or "")[:max_chars]
+        last_err = None
+        for attempt in range(retries + 1):
+            try:
+                out = _orig_get_ai_suggestion(api_key, safe_prompt)
+                return (out or "").strip()
+            except Exception as e:
+                msg = str(e)
+                last_err = e
+                if any(code in msg for code in (" 500", " 502", " 503", " 504", " 429")):
+                    time.sleep(backoff_base * (2 ** attempt))
+                    continue
+                return ""
+        return ""
+
+    # ---- Normalizers & merge/dedupe so counts are correct --------------------
+    # Accept IDs like R-001, S-12, SYS-001, FLT-003, etc. (1–8 letters)
+    _ID_RE = re.compile(r"^[A-Z]{1,8}-\d{1,5}\b")
+
+    def _normalize_req_text(t: str) -> str:
+        """
+        Strong normalizer for deduping cross sources:
+        - lowercase
+        - collapse whitespace and trim space before punctuation
+        - remove leading '"text":' (or text:) labels
+        - normalize curly quotes/dashes
+        - strip surrounding quotes if whole sentence is quoted
+        - drop trailing terminal punctuation for near-duplicates
+        """
+        t = (t or "").strip()
+        # Normalize curly quotes/dashes to straight
+        trans = {
+            ord("“"): '"', ord("”"): '"', ord("‘"): "'", ord("’"): "'",
+            ord("\u2013"): "-",  # en dash
+            ord("\u2014"): "-",  # em dash
+        }
+        t = t.translate(trans)
+
+        # Remove leading label like: "text": or text:
+        t = re.sub(r'^\s*"?text"?\s*:\s*', "", t, flags=re.IGNORECASE)
+
+        # If the whole sentence is wrapped in matching quotes, strip them
+        if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+            t = t[1:-1].strip()
+
+        # Lowercase
+        t = t.lower()
+
+        # Collapse whitespace
+        t = re.sub(r"\s+", " ", t)
+
+        # Remove space before punctuation
+        t = re.sub(r"[ \t]+([,.;:])", r"\1", t)
+
+        # Drop trailing terminal punctuation to align near-duplicates
+        t = t.rstrip(" .;:")
+
+        return t
+
+    def _merge_unique_reqs(*lists):
+        """
+        Merge lists of (id, text) with de-duplication.
+        Priority: first occurrence wins.
+        Deduping by:
+          - exact ID (when present), and
+          - normalized text (plus a stronger alphanumeric-only signature)
+        """
+        seen_ids = set()
+        seen_texts = set()        # normalized text
+        seen_texts_alnum = set()  # alphanumeric signature
+        out = []
+        auto_idx = 1
+
+        def _norm_alnum(s: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+        def _next_auto_id():
+            nonlocal auto_idx
+            rid = f"R-{auto_idx:03d}"
+            auto_idx += 1
+            return rid
+
+        for lst in lists:
+            for rid, rtxt in (lst or []):
+                rid = (rid or "").strip()
+                rtxt = (rtxt or "").strip()
+                if not rtxt:
+                    continue
+
+                has_id = bool(_ID_RE.match(rid))
+                norm = _normalize_req_text(rtxt)
+                norm_alnum = _norm_alnum(norm)
+
+                # Dedup by text signature (even if different ID)
+                if norm in seen_texts or norm_alnum in seen_texts_alnum:
+                    continue
+
+                if has_id:
+                    if rid in seen_ids:
+                        # already saw this ID; keep first occurrence
+                        continue
+                    seen_ids.add(rid)
+
+                # Remember signatures
+                seen_texts.add(norm)
+                seen_texts_alnum.add(norm_alnum)
+
+                # If no valid ID, assign synthetic
+                if not has_id:
+                    rid = _next_auto_id()
+
+                out.append((rid, rtxt))
+        return out
+
+    # ---- Header --------------------------------------------------------------
     pname = st.session_state.selected_project[1] if st.session_state.selected_project else None
     if st.session_state.selected_project is None:
         st.header("Analyze Documents & Text")
@@ -45,7 +175,7 @@ def render(st, db, rule_engine, CTX):
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
-    # ===== Quick Paste Analyzer — persist results so AI buttons work after rerun =====
+    # ===== Quick Paste Analyzer ------------------------------------------------
     st.subheader("🔍 Quick Paste Analyzer — single or small set")
     quick_text = st.text_area(
         "Paste one or more requirements (one per line). You may prefix with an ID like `REQ-001:`",
@@ -54,7 +184,7 @@ def render(st, db, rule_engine, CTX):
     )
     st.caption("Example:\nREQ-001: The system shall report position within 500 ms.\nREQ-001.1.")
 
-    # session keys for persistence
+    # session keys
     if "quick_results" not in st.session_state:
         st.session_state.quick_results = []   # list of dicts with analysis
     if "quick_issue_counts" not in st.session_state:
@@ -82,30 +212,164 @@ def render(st, db, rule_engine, CTX):
                 rtx = t
             rows.append((rid, rtx))
             idx += 1
-        return rows
+        # dedupe quick paste too
+        return _merge_unique_reqs(rows)
 
-    # Local AI helpers
-    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
-        prompt = f"""
-You are a senior systems engineer. Rewrite the requirement below to be:
-- single sentence, active voice, using "shall"
-- unambiguous (no vague terms), testable (include precise conditions/thresholds if implied)
-- keep the original intent; do not add scope
-- no extra commentary; OUTPUT ONLY the rewritten sentence
+    # ---- AI prompts (rewrite + decompose) ------------------------------------
+    def _ai_rewrite_prompt(req_text: str) -> str:
+        # preserves all numbers/units/ranges; no inventions
+        return f"""
+You are a senior systems engineer. Rewrite the requirement below into EXACTLY ONE clear, verifiable sentence in ACTIVE voice using the verb "shall".
+CRITICAL RULES:
+- Preserve ALL original numeric values, ranges, thresholds, probabilities, units, symbols, and enumerations EXACTLY (e.g., 99.9%, -25°C to +55°C, 0–100% (non-condensing), 120 km/h). Do not invent values. Do not change units.
+- Keep the original intent and scope. If details are not specified, do NOT add any new conditions or numbers.
+- Remove vagueness (e.g., "robust", "approximately", "user-friendly") only if you can restate without introducing new numbers.
+- Make it singular (one action) if possible; otherwise keep the main action clear.
+- OUTPUT: the single rewritten sentence ONLY (no lists, no commentary).
 
 Requirement:
 \"\"\"{(req_text or '').strip()}\"\"\""""
-        out = get_ai_suggestion(api_key, prompt) or ""
+
+    def _ai_decompose_prompt(parent_id: str, cleaned_sentence: str) -> str:
+        # minimal children 2–4; preserve numbers/units; strict IDing
+        return f"""
+You are decomposing a requirement that contains multiple distinct actions.
+Produce the MINIMUM number of child requirements (2–4) needed to make each child a SINGLE, testable "shall" statement.
+RULES:
+- Preserve ALL original numeric values, units, symbols, ranges EXACTLY. Do NOT invent numbers or tighten/relax thresholds.
+- Each child must be independent and verifiable.
+- Use child IDs in the format {parent_id}.1, {parent_id}.2, ... (no other text).
+- OUTPUT FORMAT: each child on its own line as:
+{parent_id}.n: <child shall sentence>
+
+Parent requirement:
+\"\"\"{cleaned_sentence.strip()}\"\"\""""
+
+    # ---- Local AI helpers ----------------------------------------------------
+    def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
+        out = get_ai_suggestion(api_key, _ai_rewrite_prompt(req_text)) or ""
+        # return first non-empty line
         for ln in out.splitlines():
             ln = ln.strip()
             if ln:
                 return ln
         return out.strip()
 
-    def _ai_decompose_clean(api_key: str, req_text: str) -> str:
-        return decompose_requirement_with_ai(api_key, req_text) or ""
+    def _ai_decompose_children(api_key: str, parent_id: str, cleaned_sentence: str) -> str:
+        return decompose_requirement_with_ai(api_key, _ai_decompose_prompt(parent_id, cleaned_sentence)) or ""
 
-    # Analyze button stores results in session so later AI button clicks don't lose state
+    # --- Batch rewrite helper -------------------------------------------------
+    def _ai_batch_rewrite(api_key: str, items):
+        """
+        items: list[dict] with keys: id, text, ambiguous, passive, incomplete, singularity
+        Stores results in st.session_state[f"rewritten_cache_{id}"]
+        """
+        total = len(items)
+        if total == 0:
+            return 0
+        prog = st.progress(0.0)
+        done = 0
+        for r in items:
+            try:
+                suggestion = _ai_rewrite_clarity(api_key, r["text"])
+                st.session_state[f"rewritten_cache_{r['id']}"] = suggestion.strip()
+                done += 1
+            except Exception:
+                pass
+            prog.progress(done / total)
+        return done
+
+    # --- Batch rewrite + conditional decompose (for non-singular only) -------
+    def _ai_batch_rewrite_and_decompose(api_key: str, items):
+        """
+        For each flagged item:
+          - rewrite to clear, singular text
+          - if the original had singularity issues, also decompose (use rewritten text when available)
+        Stores:
+          - st.session_state['rewritten_cache_{id}']
+          - st.session_state['decomp_cache_{id}']  (append if multiple decompositions)
+        Returns (rewrote_count, decomposed_count)
+        """
+        total = len(items)
+        if total == 0:
+            return 0, 0
+        prog = st.progress(0.0)
+        done = 0
+        rewrote = 0
+        decomped = 0
+        for r in items:
+            # 1) rewrite
+            rewritten = ""
+            try:
+                rewritten = _ai_rewrite_clarity(api_key, r["text"]) or ""
+                st.session_state[f"rewritten_cache_{r['id']}"] = rewritten.strip()
+                if rewritten.strip():
+                    rewrote += 1
+            except Exception:
+                pass
+
+            # 2) decompose only if singularity issue present
+            if r.get("singularity"):
+                base = (rewritten.strip() or r["text"]).strip()
+                try:
+                    dec = _ai_decompose_children(api_key, r["id"], base) or ""
+                    if dec.strip():
+                        key = f"decomp_cache_{r['id']}"
+                        existing = st.session_state.get(key, "").strip()
+                        combined = (existing + "\n" + dec.strip()).strip() if existing and dec.strip() not in existing else (dec.strip() or existing)
+                        st.session_state[key] = combined
+                        decomped += 1
+                except Exception:
+                    pass
+
+            done += 1
+            prog.progress(done / total)
+        return rewrote, decomped
+
+    # --- Helper: show only failing categories ---------------------------------
+    def _error_badges(r):
+        labels = []
+        if r.get("ambiguous"):
+            labels.append("⚠️ Ambiguity")
+        if r.get("passive"):
+            labels.append("⚠️ Passive Voice")
+        if r.get("incomplete"):
+            labels.append("⚠️ Incomplete")
+        if r.get("singularity"):
+            labels.append("⚠️ Not Singular")
+        if not labels:
+            return ""
+        chips = " ".join(
+            f"<span style='background:#FFF3CD;color:#856404;padding:4px 10px;border-radius:999px;display:inline-block;margin:0 6px 6px 0;font-size:0.85rem'>{t}</span>"
+            for t in labels
+        )
+        return f"<div>{chips}</div>"
+
+    # --- Helper: turn decomposition markdown/text into child rows --------------
+    def _extract_child_rows_from_decomp(parent_id: str, decomp_text: str):
+        """
+        Accepts the AI decomposition text and returns [(child_id, child_text), ...].
+        Accepts lines like:
+          PARENT.1: text
+          - PARENT.2: text
+          * PARENT.3: text
+          • PARENT.4: text
+        """
+        if not decomp_text:
+            return []
+        rows = []
+        pid = parent_id.split(":")[0].strip()
+        patt = re.compile(rf"^\s*[-*•]?\s*({re.escape(pid)}\.\d+)\s*:\s*(.+)$")
+        for raw in decomp_text.splitlines():
+            ln = raw.strip()
+            if not ln:
+                continue
+            m = patt.match(ln)
+            if m:
+                rows.append((m.group(1).strip(), m.group(2).strip()))
+        return rows
+
+    # ---- Analyze (Quick Paste) -----------------------------------------------
     if st.button("Analyze Pasted Lines", key="quick_analyze_btn"):
         pairs = _parse_quick_lines(quick_text)
         if not pairs:
@@ -133,13 +397,12 @@ Requirement:
                     "id": rid, "text": rtx,
                     "ambiguous": amb, "passive": pas, "incomplete": inc, "singularity": sing
                 })
-            # persist
             st.session_state.quick_results = quick_results
             st.session_state.quick_issue_counts = issue_counts
             st.session_state.quick_analyzed = True
             st.session_state.quick_text_snapshot = quick_text
 
-    # ---- Render quick results if we have them in session ----
+    # ---- Render quick results -------------------------------------------------
     if st.session_state.quick_analyzed and st.session_state.quick_results:
         quick_results = st.session_state.quick_results
         issue_counts = st.session_state.quick_issue_counts
@@ -153,6 +416,32 @@ Requirement:
         cqa[2].metric("Incomplete", issue_counts["Incompleteness"])
         cqa[3].metric("Multiple actions", issue_counts["Singularity"])
 
+        # --- bulk buttons (Quick Paste) ---
+        if st.session_state.api_key:
+            cols_bulk = st.columns([1.3, 1.9])
+            with cols_bulk[0]:
+                if st.button("✨ Rewrite all flagged (AI)", key="quick_rewrite_all"):
+                    with st.spinner("AI rewriting all flagged requirements..."):
+                        flagged_list_for_rewrite = [
+                            r for r in quick_results
+                            if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
+                        ]
+                        rew_count = _ai_batch_rewrite(st.session_state.api_key, flagged_list_for_rewrite)
+                    st.success(f"Rewrote {rew_count} requirement(s).")
+            with cols_bulk[1]:
+                if st.button("⚡ Rewrite & Decompose all flagged (AI)", key="quick_rewrite_decomp_all"):
+                    with st.spinner("AI rewriting and decomposing flagged requirements..."):
+                        flagged_list_for_action = [
+                            r for r in quick_results
+                            if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
+                        ]
+                        rew_count, dec_count = _ai_batch_rewrite_and_decompose(
+                            st.session_state.api_key, flagged_list_for_action
+                        )
+                    st.success(f"Rewrote {rew_count} and decomposed {dec_count} requirement(s).")
+        else:
+            st.caption("ℹ️ Enter your Google AI API key to enable bulk AI rewrites/decomposition.")
+
         flagged_list = [r for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]]
         clear_list   = [r for r in quick_results if not (r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])]
 
@@ -165,34 +454,102 @@ Requirement:
                     format_requirement_with_highlights(r["id"], r["text"], r),
                     unsafe_allow_html=True,
                 )
+                badges_html = _error_badges(r)
+                if badges_html:
+                    st.markdown(badges_html, unsafe_allow_html=True)
 
-                # Always offer AI Rewrite for flagged lines; persist output to CSV via cache key
-                col_rw, col_dc = st.columns(2)
-                with col_rw:
-                    if st.session_state.api_key and st.button(f"✨ AI Rewrite {r['id']}", key=f"quick_rew_{r['id']}"):
-                        try:
-                            hints = []
-                            if r["ambiguous"]: hints.append(f"remove ambiguity ({', '.join(r['ambiguous'])})")
-                            if r["passive"]:   hints.append("use active voice")
-                            if r["incomplete"]:hints.append("complete the sentence")
-                            guidance = "; ".join(hints) if hints else "ensure clarity, singularity, and testability"
-                            prompt = f"""Rewrite as ONE clear, singular, verifiable requirement using 'shall' in active voice; {guidance}.
-Original: \"\"\"{r['text']}\"\"\""""
-                            suggestion = get_ai_suggestion(st.session_state.api_key, prompt)
-                            st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
-                            st.info("AI Rewrite:")
-                            st.markdown(f"> {suggestion}")
-                        except Exception as e:
-                            st.warning(f"AI rewrite failed: {e}")
+                # AI actions with strict gating
+                has_amb = bool(r.get("ambiguous"))
+                has_pas = bool(r.get("passive"))
+                has_inc = bool(r.get("incomplete"))
+                has_sing = bool(r.get("singularity"))
+                only_sing = has_sing and not (has_amb or has_pas or has_inc)
 
-                with col_dc:
-                    if st.session_state.api_key and r["singularity"] and st.button(f"🧩 Decompose {r['id']}", key=f"quick_dec_{r['id']}"):
-                        try:
-                            d = _ai_decompose_clean(st.session_state.api_key, f"{r['id']} {r['text']}")
-                            st.info("AI Decomposition:")
-                            st.markdown(d)
-                        except Exception as e:
-                            st.warning(f"AI decomposition failed: {e}")
+                if st.session_state.api_key:
+                    if only_sing:
+                        # ONLY Not Singular -> show only Decompose
+                        cols = st.columns(1)
+                        with cols[0]:
+                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_only_{r['id']}"):
+                                try:
+                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
+                                    if d.strip():
+                                        key = f"decomp_cache_{r['id']}"
+                                        existing = st.session_state.get(key, "").strip()
+                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
+                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
+                                    st.info("Decomposition:")
+                                    st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
+                                except Exception as e:
+                                    st.warning(f"AI decomposition failed: {e}")
+                    elif has_sing:
+                        # Not Singular + other issues -> Fix, Decompose, Auto
+                        cols = st.columns(3)
+
+                        with cols[0]:
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"):
+                                try:
+                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
+                                    st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
+                                    st.info("Rewritten:")
+                                    st.markdown(f"> {suggestion}")
+                                except Exception as e:
+                                    st.warning(f"AI rewrite failed: {e}")
+                        with cols[1]:
+                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"):
+                                try:
+                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
+                                    if d.strip():
+                                        key = f"decomp_cache_{r['id']}"
+                                        existing = st.session_state.get(key, "").strip()
+                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
+                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
+                                    st.info("Decomposition:")
+                                    st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
+                                except Exception as e:
+                                    st.warning(f"AI decomposition failed: {e}")
+                        with cols[2]:
+                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"):
+                                try:
+                                    cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                    st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], cleaned)
+                                    if d.strip():
+                                        key = f"decomp_cache_{r['id']}"
+                                        existing = st.session_state.get(key, "").strip()
+                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
+                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
+                                    st.success("Rewritten requirement:")
+                                    st.markdown(f"> {cleaned}")
+                                    if st.session_state.get(f"decomp_cache_{r['id']}", ""):
+                                        st.info("Decomposition:")
+                                        st.markdown(st.session_state[f"decomp_cache_{r['id']}"])
+                                except Exception as e:
+                                    st.warning(f"AI pipeline failed: {e}")
+                    else:
+                        # No Not-Singular, but has other issues -> show only Fix Clarity
+                        cols = st.columns(1)
+                        with cols[0]:
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_only_{r['id']}"):
+                                try:
+                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
+                                    st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
+                                    st.info("Rewritten:")
+                                    st.markdown(f"> {suggestion}")
+                                except Exception as e:
+                                    st.warning(f"AI rewrite failed: {e}")
+
+                # show cached results inline
+                cached_rw = st.session_state.get(f"rewritten_cache_{r['id']}", "")
+                cached_dc = st.session_state.get(f"decomp_cache_{r['id']}", "")
+                if cached_rw:
+                    st.caption("AI Rewrite (cached):")
+                    st.code(cached_rw)
+                if cached_dc:
+                    st.caption("AI Decomposition (cached):")
+                    st.markdown(cached_dc)
 
         st.subheader("Clear")
         for r in clear_list:
@@ -202,8 +559,8 @@ Original: \"\"\"{r['text']}\"\"\""""
                 unsafe_allow_html=True,
             )
 
-        # CSV export (includes any AI rewrites the user triggered)
-        exp_rows = []
+        # --- Single CSV export: corrected + decomposed (children as rows) -----
+        expanded_rows = []
         for r in quick_results:
             issues = []
             if r["ambiguous"]: issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
@@ -211,23 +568,44 @@ Original: \"\"\"{r['text']}\"\"\""""
             if r["incomplete"]:issues.append("Incompleteness")
             if r["singularity"]:issues.append(f"Singularity: {', '.join(r['singularity'])}")
             ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
-            exp_rows.append({
+            ai_dec = st.session_state.get(f"decomp_cache_{r['id']}", "")
+
+            expanded_rows.append({
                 "Requirement ID": r["id"],
                 "Requirement Text": r["text"],
                 "Status": "Clear" if not issues else "Flagged",
                 "Issues Found": "; ".join(issues),
-                "AI Rewrite (if generated)": ai_rew,
+                "AI Rewrite": ai_rew,
+                "AI Decomposition": ai_dec,
+                "Is Decomposed Child": "No",
+                "Parent ID": "",
             })
-        df_quick = pd.DataFrame(exp_rows)
+
+            try:
+                for child_id, child_text in _extract_child_rows_from_decomp(r["id"], ai_dec):
+                    expanded_rows.append({
+                        "Requirement ID": child_id,
+                        "Requirement Text": child_text,
+                        "Status": "Decomposed Child",
+                        "Issues Found": "",
+                        "AI Rewrite": "",
+                        "AI Decomposition": "",
+                        "Is Decomposed Child": "Yes",
+                        "Parent ID": r["id"],
+                    })
+            except Exception:
+                pass
+
+        df_quick_expanded = pd.DataFrame(expanded_rows)
         st.download_button(
-            "Download Quick Analysis (CSV)",
-            data=df_quick.to_csv(index=False).encode("utf-8"),
-            file_name="ReqCheck_Quick_Analysis.csv",
+            "Download Analysis (CSV)",
+            data=df_quick_expanded.to_csv(index=False).encode("utf-8-sig"),
+            file_name="ReqCheck_Analysis.csv",
             mime="text/csv",
-            key="dl_quick_csv"
+            key="dl_quick_csv_expanded_single"
         )
 
-    # ===================== Full Document Analyzer (unchanged logic) =====================
+    # ===================== Full Document Analyzer =============================
     st.subheader("📁 Upload Documents — analyze one or more files")
     use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
     if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
@@ -290,95 +668,65 @@ Original: \"\"\"{r['text']}\"\"\""""
         _fn, _path = stored_to_analyze
         docs_to_process.append(("stored", _fn, _path))
 
-    # ===================== Analyzer-local AI helpers (shared) =====================
+    # === Analyzer-local AI helpers (shared) ===================================
     def _ai_rewrite_clarity_doc(api_key: str, req_text: str) -> str:
-        prompt = f"""
-You are a senior systems engineer. Rewrite the requirement below to be:
-- single sentence, active voice, using "shall"
-- unambiguous and testable
-- keep the original intent; no scope changes
-- OUTPUT ONLY the rewritten sentence
-Requirement:
-\"\"\"{(req_text or '').strip()}\"\"\""""
-        out = get_ai_suggestion(st.session_state.api_key, prompt) or ""
+        out = get_ai_suggestion(st.session_state.api_key, _ai_rewrite_prompt(req_text)) or ""
         for ln in out.splitlines():
             ln = ln.strip()
             if ln:
                 return ln
         return out.strip()
 
-    def _ai_decompose_clean_doc(api_key: str, req_text: str) -> str:
-        return decompose_requirement_with_ai(api_key, req_text) or ""
-    # ============================================================================
+    def _ai_decompose_clean_doc(api_key: str, parent_id: str, req_text: str) -> str:
+        return decompose_requirement_with_ai(api_key, _ai_decompose_prompt(parent_id, req_text)) or ""
+    # ==========================================================================
 
     if docs_to_process:
         with st.spinner("Processing and analyzing documents..."):
             saved_count = 0
             for src_type, display_name, payload in docs_to_process:
-                # --- Extract requirements (AI or standard) ---
-                if src_type == "upload":
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        if payload.name.endswith(".txt"):
-                            raw = payload.getvalue().decode("utf-8", errors="ignore")
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                            if not reqs and raw:
-                                reqs = extract_requirements_from_string(raw)
-                        elif payload.name.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows(payload)
-                            table_reqs = _extract_requirements_from_table_rows(table_rows)
-                            if table_reqs:
-                                reqs = table_reqs
-                                raw = None
-                            else:
-                                raw = flat_text
-                                reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                                if not reqs and raw:
-                                    reqs = extract_requirements_from_string(raw)
-                        else:
-                            raw = ""
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw)
-                    else:
-                        reqs = extract_requirements_from_file(payload)
+                # --- Extract requirements (AI + standard + table) and merge/dedupe ---
+                std_reqs, table_reqs, ai_reqs = [], [], []
 
+                if src_type == "upload":
+                    if payload.name.endswith(".txt"):
+                        raw = payload.getvalue().decode("utf-8", errors="ignore")
+                        std_reqs = extract_requirements_from_string(raw) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or []
+                    elif payload.name.endswith(".docx"):
+                        flat_text, table_rows = _read_docx_text_and_rows(payload)
+                        table_reqs = _extract_requirements_from_table_rows(table_rows) or []
+                        std_reqs = extract_requirements_from_string(flat_text) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or []
                 elif src_type == "stored":
                     path = payload
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        if path.endswith(".txt"):
-                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                                raw = f.read()
-                            reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or extract_requirements_from_string(raw)
-                        elif path.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
-                            table_reqs = _extract_requirements_from_table_rows(table_rows)
-                            if table_reqs:
-                                reqs = table_reqs
-                            else:
-                                reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or extract_requirements_from_string(flat_text)
-                        else:
-                            reqs = []
-                    else:
-                        if path.endswith(".txt"):
-                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                                raw = f.read()
-                            reqs = extract_requirements_from_string(raw)
-                        elif path.endswith(".docx"):
-                            flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
-                            reqs = _extract_requirements_from_table_rows(table_rows) or extract_requirements_from_string(flat_text)
-                        else:
-                            reqs = []
-
+                    if path.endswith(".txt"):
+                        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                            raw = f.read()
+                        std_reqs = extract_requirements_from_string(raw) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or []
+                    elif path.endswith(".docx"):
+                        flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
+                        table_reqs = _extract_requirements_from_table_rows(table_rows) or []
+                        std_reqs = extract_requirements_from_string(flat_text) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or []
                 else:  # example
+                    std_reqs = extract_requirements_from_string(payload) or []
                     if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
-                        reqs = extract_requirements_with_ai(st.session_state.api_key, payload)
-                    else:
-                        reqs = extract_requirements_from_string(payload)
+                        ai_reqs = extract_requirements_with_ai(st.session_state.api_key, payload) or []
 
+                #           Merge + dedupe => correct counts, no spurious inflation
+                reqs = _merge_unique_reqs(table_reqs, std_reqs, ai_reqs)
                 total_reqs = len(reqs)
                 if total_reqs == 0:
                     st.warning(f"⚠️ No recognizable requirements in **{display_name}**.")
                     continue
 
-                # --- Analyze requirements ---
+                # --- Analyze requirements --------------------------------------------
                 results = []
                 issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
 
@@ -391,14 +739,10 @@ Requirement:
                     except Exception:
                         singular = []
 
-                    if ambiguous:
-                        issue_counts["Ambiguity"] += 1
-                    if passive:
-                        issue_counts["Passive Voice"] += 1
-                    if incomplete:
-                        issue_counts["Incompleteness"] += 1
-                    if singular:
-                        issue_counts["Singularity"] += 1
+                    if ambiguous:  issue_counts["Ambiguity"]      += 1
+                    if passive:    issue_counts["Passive Voice"]  += 1
+                    if incomplete: issue_counts["Incompleteness"] += 1
+                    if singular:   issue_counts["Singularity"]    += 1
 
                     results.append({
                         "id": rid,
@@ -415,7 +759,7 @@ Requirement:
                 )
                 clarity_score = int(((total_reqs - flagged_total) / total_reqs) * 100) if total_reqs else 100
 
-                # --- Save to DB if helpers exist and a project is selected (new inputs only) ---
+                # --- Save to DB if helpers exist and a project is selected ------------
                 if (st.session_state.selected_project is not None) and (src_type in ("upload", "example")):
                     project_id = st.session_state.selected_project[0]
                     try:
@@ -433,15 +777,11 @@ Requirement:
                                 try:
                                     file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
                                     if hasattr(db, "add_document_file"):
-                                        try:
-                                            db.add_document_file(doc_id, file_path)
-                                        except Exception:
-                                            pass
+                                        try: db.add_document_file(doc_id, file_path)
+                                        except Exception: pass
                                     elif hasattr(db, "set_document_file_path"):
-                                        try:
-                                            db.set_document_file_path(doc_id, file_path)
-                                        except Exception:
-                                            pass
+                                        try: db.set_document_file_path(doc_id, file_path)
+                                        except Exception: pass
                                 except Exception as _e:
                                     st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
 
@@ -453,15 +793,11 @@ Requirement:
                                 try:
                                     file_path = _save_uploaded_file_for_doc(project_id, doc_id, display_name, payload)
                                     if hasattr(db, "add_document_file"):
-                                        try:
-                                            db.add_document_file(doc_id, file_path)
-                                        except Exception:
-                                            pass
+                                        try: db.add_document_file(doc_id, file_path)
+                                        except Exception: pass
                                     elif hasattr(db, "set_document_file_path"):
-                                        try:
-                                            db.set_document_file_path(doc_id, file_path)
-                                        except Exception:
-                                            pass
+                                        try: db.set_document_file_path(doc_id, file_path)
+                                        except Exception: pass
                                 except Exception as _e:
                                     st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
                         else:
@@ -469,7 +805,7 @@ Requirement:
                     except Exception as e:
                         st.warning(f"Saved analysis for **{display_name}**, but DB write failed: {e}")
 
-                # --- Per-document results UI ---
+                # --- Per-document results UI -----------------------------------------
                 with st.expander(f"📄 {display_name} — Clarity {clarity_score}/100 • {total_reqs} requirements"):
                     flagged_total = sum(
                         1 for r in results
@@ -481,38 +817,75 @@ Requirement:
                     c3.metric("Clarity Score", f"{clarity_score} / 100")
                     st.progress(clarity_score)
 
-                    # --- Export CSV for this single document (includes AI Rewrite) ---
-                    export_rows = []
+                    # bulk buttons (Per-document)
+                    flagged_for_doc = [
+                        r for r in results
+                        if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
+                    ]
+                    if st.session_state.api_key:
+                        cols_bulk_doc = st.columns([1.7, 2.1])
+                        with cols_bulk_doc[0]:
+                            if st.button(f"✨ Rewrite all flagged in '{display_name}'", key=f"doc_rewrite_all_{display_name}"):
+                                with st.spinner(f"AI rewriting flagged requirements in '{display_name}'..."):
+                                    rew_count = _ai_batch_rewrite(st.session_state.api_key, flagged_for_doc)
+                                st.success(f"Rewrote {rew_count} requirement(s).")
+                        with cols_bulk_doc[1]:
+                            if st.button(f"⚡ Rewrite & Decompose all flagged in '{display_name}'", key=f"doc_rewrite_decomp_all_{display_name}"):
+                                with st.spinner(f"AI rewriting and decomposing flagged requirements in '{display_name}'..."):
+                                    rew_count, dec_count = _ai_batch_rewrite_and_decompose(
+                                        st.session_state.api_key, flagged_for_doc
+                                    )
+                                st.success(f"Rewrote {rew_count} and decomposed {dec_count} requirement(s).")
+                    else:
+                        st.caption("ℹ️ Enter your Google AI API key to enable bulk AI rewrites/decomposition for this document.")
+
+                    # --- Single CSV export per document (parent+children) --------------
+                    expanded_rows_doc = []
                     for r in results:
                         issues = []
-                        if r["ambiguous"]:
-                            issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
-                        if r["passive"]:
-                            issues.append(f"Passive Voice: {', '.join(r['passive'])}")
-                        if r["incomplete"]:
-                            issues.append("Incompleteness")
-                        if r["singularity"]:
-                            issues.append(f"Singularity: {', '.join(r['singularity'])}")
+                        if r["ambiguous"]: issues.append(f"Ambiguity: {', '.join(r['ambiguous'])}")
+                        if r["passive"]:   issues.append(f"Passive Voice: {', '.join(r['passive'])}")
+                        if r["incomplete"]:issues.append("Incompleteness")
+                        if r["singularity"]:issues.append(f"Singularity: {', '.join(r['singularity'])}")
 
                         ai_rew = st.session_state.get(f"rewritten_cache_{r['id']}", "")
+                        ai_dec = st.session_state.get(f"decomp_cache_{r['id']}", "")
 
-                        export_rows.append({
+                        expanded_rows_doc.append({
                             "Document": display_name,
                             "Requirement ID": r["id"],
                             "Requirement Text": r["text"],
                             "Status": "Clear" if not issues else "Flagged",
                             "Issues Found": "; ".join(issues),
-                            "AI Rewrite (if generated)": ai_rew,
+                            "AI Rewrite": ai_rew,
+                            "AI Decomposition": ai_dec,
+                            "Is Decomposed Child": "No",
+                            "Parent ID": "",
                         })
 
-                    df_doc = pd.DataFrame(export_rows)
-                    csv_doc = df_doc.to_csv(index=False).encode("utf-8")
+                        try:
+                            for child_id, child_text in _extract_child_rows_from_decomp(r["id"], ai_dec):
+                                expanded_rows_doc.append({
+                                    "Document": display_name,
+                                    "Requirement ID": child_id,
+                                    "Requirement Text": child_text,
+                                    "Status": "Decomposed Child",
+                                    "Issues Found": "",
+                                    "AI Rewrite": "",
+                                    "AI Decomposition": "",
+                                    "Is Decomposed Child": "Yes",
+                                    "Parent ID": r["id"],
+                                })
+                        except Exception:
+                            pass
+
+                    df_doc_expanded = pd.DataFrame(expanded_rows_doc)
                     st.download_button(
                         label=f"Download '{display_name}' Analysis (CSV)",
-                        data=csv_doc,
+                        data=df_doc_expanded.to_csv(index=False).encode("utf-8-sig"),
                         file_name=f"{os.path.splitext(display_name)[0]}_ReqCheck_Report.csv",
                         mime="text/csv",
-                        key=f"dl_csv_{display_name}",
+                        key=f"dl_csv_expanded_{display_name}",
                     )
 
                     st.subheader("Issues by Type")
@@ -545,6 +918,10 @@ Requirement:
                                     format_requirement_with_highlights(r["id"], r["text"], r),
                                     unsafe_allow_html=True,
                                 )
+                                badges_html = _error_badges(r)
+                                if badges_html:
+                                    st.markdown(badges_html, unsafe_allow_html=True)
+
                                 if r["ambiguous"]:
                                     st.caption(f"ⓘ **Ambiguity:** {', '.join(r['ambiguous'])}")
                                 if r["passive"]:
@@ -554,99 +931,90 @@ Requirement:
                                 if r["singularity"]:
                                     st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
 
-                                # Count issue categories
-                                issue_types_present = sum([
-                                    1 if r["ambiguous"] else 0,
-                                    1 if r["passive"] else 0,
-                                    1 if r["incomplete"] else 0,
-                                    1 if r["singularity"] else 0,
-                                ])
+                                # Action buttons with strict gating
+                                has_amb = bool(r.get("ambiguous"))
+                                has_pas = bool(r.get("passive"))
+                                has_inc = bool(r.get("incomplete"))
+                                has_sing = bool(r.get("singularity"))
+                                only_sing = has_sing and not (has_amb or has_pas or has_inc)
 
-                                if issue_types_present >= 2:
-                                    # Enhanced flow: Fix → Decompose
-                                    with st.expander("✨ AI Suggestions (Fix clarity first, then decompose)"):
-                                        if not st.session_state.api_key:
-                                            st.warning("Please enter your Google AI API Key.")
-                                        else:
-                                            issues_summary = []
-                                            if r["ambiguous"]:    issues_summary.append("Ambiguity")
-                                            if r["passive"]:      issues_summary.append("Passive Voice")
-                                            if r["incomplete"]:   issues_summary.append("Incompleteness")
-                                            if r["singularity"]:  issues_summary.append("Non-singular")
-                                            if issues_summary:
-                                                st.caption("Issues detected: " + ", ".join(issues_summary))
-
-                                            cache_key = f"rewritten_cache_{r['id']}"
-                                            if cache_key not in st.session_state:
-                                                st.session_state[cache_key] = ""
-
-                                            btn_row = st.columns([1.3, 1.6, 1.6])
-                                            with btn_row[0]:
-                                                if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
-                                                    with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
-                                                        st.session_state[cache_key] = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                    if st.session_state[cache_key]:
-                                                        st.success("Rewritten draft ready (see below).")
-                                                    else:
-                                                        st.info("No rewrite returned.")
-
-                                            with btn_row[1]:
-                                                if st.button(f"🧩 Decompose (After Fix) [{r['id']}]", key=f"decomp_after_fix_{r['id']}"):
-                                                    with st.spinner("Preparing clean text, then decomposing..."):
-                                                        base = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, base)
+                                if st.session_state.api_key:
+                                    if only_sing:
+                                        # ONLY Not Singular -> Decompose only
+                                        cols = st.columns(1)
+                                        with cols[0]:
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_only_{r['id']}"):
+                                                with st.spinner("Decomposing into single-action children..."):
+                                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                    decomp = _ai_decompose_clean_doc(st.session_state.api_key, r["id"], base)
                                                     if decomp.strip():
-                                                        st.info("Decomposition (based on cleaned requirement):")
-                                                        st.markdown(decomp)
-                                                    else:
-                                                        st.info("No decomposition returned.")
-
-                                            with btn_row[2]:
-                                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}]"):
-                                                    with st.spinner("Rewriting, then decomposing..."):
-                                                        cleaned = st.session_state[cache_key].strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
-                                                        st.session_state[cache_key] = cleaned
-                                                        decomp = _ai_decompose_clean_doc(st.session_state.api_key, cleaned)
-                                                    if cleaned:
-                                                        st.success("Rewritten requirement:")
-                                                        st.markdown(f"> {cleaned}")
+                                                        key = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(key, "").strip()
+                                                        st.session_state[key] = ((existing + "\n" + decomp.strip()).strip()
+                                                                                 if existing and decomp.strip() not in existing else (decomp.strip() or existing))
+                                                st.info("Decomposition:")
+                                                st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", decomp))
+                                    elif has_sing:
+                                        # Not Singular + other issues -> Fix, Decompose, Auto
+                                        cols = st.columns(3)
+                                        with cols[0]:
+                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
+                                                with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
+                                                    cleaned = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                    st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
+                                                if cleaned:
+                                                    st.success("Rewritten draft:")
+                                                    st.markdown(f"> {cleaned}")
+                                        with cols[1]:
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_{r['id']}"):
+                                                with st.spinner("Decomposing into single-action children..."):
+                                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                    decomp = _ai_decompose_clean_doc(st.session_state.api_key, r["id"], base)
                                                     if decomp.strip():
-                                                        st.info("Decomposition:")
-                                                        st.markdown(decomp)
+                                                        key = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(key, "").strip()
+                                                        st.session_state[key] = ((existing + "\n" + decomp.strip()).strip()
+                                                                                 if existing and decomp.strip() not in existing else (decomp.strip() or existing))
+                                                st.info("Decomposition:")
+                                                st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", decomp))
+                                        with cols[2]:
+                                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}"):
+                                                with st.spinner("Rewriting, then decomposing..."):
+                                                    cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                    st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
+                                                    decomp = _ai_decompose_clean_doc(st.session_state.api_key, r["id"], cleaned)
+                                                    if decomp.strip():
+                                                        key = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(key, "").strip()
+                                                        st.session_state[key] = ((existing + "\n" + decomp.strip()).strip()
+                                                                                 if existing and decomp.strip() not in existing else (decomp.strip() or existing))
+                                                if cleaned:
+                                                    st.success("Rewritten requirement:")
+                                                    st.markdown(f"> {cleaned}")
+                                                if st.session_state.get(f"decomp_cache_{r['id']}", ""):
+                                                    st.info("Decomposition:")
+                                                    st.markdown(st.session_state[f"decomp_cache_{r['id']}"])
+                                    else:
+                                        # No Not-Singular, but has other issues -> Fix only
+                                        cols = st.columns(1)
+                                        with cols[0]:
+                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_only_{r['id']}"):
+                                                with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
+                                                    cleaned = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
+                                                    st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
+                                                if cleaned:
+                                                    st.success("Rewritten draft:")
+                                                    st.markdown(f"> {cleaned}")
 
-                                            if st.session_state.get(cache_key, ""):
-                                                st.caption("Rewritten requirement (this will appear in CSV):")
-                                                st.code(st.session_state[cache_key])
-
-                                else:
-                                    # Lightweight tools
-                                    with st.expander("✨ Get AI Rewrite / Decomposition"):
-                                        if not st.session_state.api_key:
-                                            st.warning("Please enter your Google AI API Key.")
-                                        else:
-                                            if r["singularity"]:
-                                                col1, col2 = st.columns(2)
-                                            else:
-                                                col1 = st.columns(1)[0]
-
-                                            with col1:
-                                                if st.button(f"Rewrite Requirement {r['id']}", key=f"rewrite_{r['id']}"):
-                                                    with st.spinner("AI is thinking..."):
-                                                        suggestion = _ai_rewrite_clarity_doc(st.session_state.api_key, r['text'])
-                                                    st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
-                                                    st.info("AI Suggestion (Rewrite):")
-                                                    st.markdown(f"> {suggestion}")
-
-                                            if r["singularity"]:
-                                                with col2:
-                                                    if st.button(f"Decompose Requirement {r['id']}", key=f"decompose_{r['id']}"):
-                                                        with st.spinner("AI is decomposing..."):
-                                                            decomposed_reqs = _ai_decompose_clean_doc(
-                                                                st.session_state.api_key,
-                                                                f"{r['id']} {r['text']}"
-                                                            )
-                                                        st.info("AI Suggestion (Decomposition):")
-                                                        st.markdown(decomposed_reqs)
+                                # show cached (if any)
+                                cached_rw = st.session_state.get(f"rewritten_cache_{r['id']}", "")
+                                cached_dc = st.session_state.get(f"decomp_cache_{r['id']}", "")
+                                if cached_rw:
+                                    st.caption("AI Rewrite (cached):")
+                                    st.code(cached_rw)
+                                if cached_dc:
+                                    st.caption("AI Decomposition (cached):")
+                                    st.markdown(cached_dc)
                         else:
                             st.markdown(
                                 f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
@@ -654,10 +1022,9 @@ Requirement:
                                 unsafe_allow_html=True,
                             )
 
-            # persisted uploader/example resets handled in parent if needed
             st.success("Analysis complete.")
 
-    # --- Project library (document versions) ---
+    # --- Project library (document versions) ----------------------------------
     st.divider()
     st.header("Documents in this Project")
 
@@ -684,7 +1051,7 @@ Requirement:
                     st.dataframe(df_docs, use_container_width=True)
 
                     # Export summary
-                    proj_csv = df_docs.to_csv(index=False).encode("utf-8")
+                    proj_csv = df_docs.to_csv(index=False).encode("utf-8-sig")
                     st.download_button(
                         label="Download Project Documents Summary (CSV)",
                         data=proj_csv,
