@@ -207,3 +207,4 @@ Verification Method: {method or 'Test'}"""
                     example = _rewrite_example(prompt)
                     st.info("Example rewrite (for consideration):")
                     st.markdown(f"> {example}")
+
