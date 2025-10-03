@@ -1,9 +1,10 @@
-streamlit
-python-docx
-wordcloud
-matplotlib
-spacy
-pandas
-google-generativeai
+streamlit==1.38.0
+python-docx==1.1.0
+wordcloud==1.9.3
+matplotlib==3.9.2
+spacy==3.7.4
+pandas==2.2.2
+google-generativeai==0.8.3
 
-
+# Install the spaCy English model directly (matches spaCy 3.7.x)
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
