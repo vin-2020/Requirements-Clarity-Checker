@@ -1,4 +1,3 @@
-# ui/app.py
 import streamlit as st
 import sys
 import os
@@ -55,6 +54,7 @@ get_chatbot_response = getattr(
         ) + "\nASSISTANT:"
     ),
 )
+
 
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
@@ -549,6 +549,8 @@ CTX = {
     "get_ai_suggestion": get_ai_suggestion,
     "get_chatbot_response": get_chatbot_response,
     "decompose_requirement_with_ai": decompose_requirement_with_ai,
+    "decompose_need_into_requirements": ai.decompose_need_into_requirements,
+    "run_freeform": ai.run_freeform,
     "extract_requirements_with_ai": extract_requirements_with_ai,
     "_read_docx_text_and_rows": _read_docx_text_and_rows,
     "_read_docx_text_and_rows_from_path": _read_docx_text_and_rows_from_path,
