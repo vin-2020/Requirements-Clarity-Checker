@@ -308,7 +308,7 @@ with st.sidebar:
     # Top: logo
     st.image(
         "https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true",
-        use_container_width=True
+        use_column_width=True
     )
 
     # Catchphrase (pick one from below)
@@ -609,3 +609,4 @@ with tab_chat:
         chat_tab.render(st, db, rule_engine, CTX)
     else:
         st.error("Chat tab not available.")
+
