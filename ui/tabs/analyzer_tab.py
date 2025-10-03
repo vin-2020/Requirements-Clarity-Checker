@@ -1,23 +1,11 @@
-# ui/tabs/analyzer_tab.py — patched, non-breaking
-# Notes:
-# - Keeps core concept and UI/flow identical
-# - Hardens AI calls (separate safe wrapper), fixes progress bar range,
-#   stabilizes bar chart data, avoids crashes when api_key missing,
-#   and uses Agg backend for matplotlib (Streamlit Cloud safe)
-
+# ui/tabs/analyzer_tab.py
 import os
 import re
 import docx
 import pandas as pd
 from wordcloud import WordCloud
-
-# Ensure headless backend for Streamlit Cloud
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
 import streamlit as st
-
 
 def render(st, db, rule_engine, CTX):
     """
@@ -29,7 +17,7 @@ def render(st, db, rule_engine, CTX):
     """
     # ---- CTX helpers ---------------------------------------------------------
     HAS_AI_PARSER = CTX.get("HAS_AI_PARSER", False)
-    _orig_get_ai_suggestion = CTX["get_ai_suggestion"]
+    get_ai_suggestion = CTX["get_ai_suggestion"]
     decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
     extract_requirements_with_ai = CTX.get("extract_requirements_with_ai")
 
@@ -50,11 +38,12 @@ def render(st, db, rule_engine, CTX):
 
     # ---- Hardening for flaky AI calls (retry, truncate, swallow 500s) --------
     import time
+    _orig_get_ai_suggestion = get_ai_suggestion  # keep original
 
-    def get_ai_suggestion_safe(api_key: str, prompt: str, *,
-                               max_chars: int = 6000,
-                               retries: int = 2,
-                               backoff_base: float = 0.6) -> str:
+    def get_ai_suggestion(api_key: str, prompt: str, * ,
+                          max_chars: int = 6000,
+                          retries: int = 2,
+                          backoff_base: float = 0.6):
         """
         Wrapper around CTX['get_ai_suggestion'] that:
           - truncates overly long prompts (helps avoid server 500s)
@@ -186,7 +175,7 @@ def render(st, db, rule_engine, CTX):
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
-    # ===== Quick Paste Analyzer ----------------------------------------------
+    # ===== Quick Paste Analyzer ------------------------------------------------
     st.subheader("🔍 Quick Paste Analyzer — single or small set")
     quick_text = st.text_area(
         "Paste one or more requirements (one per line). You may prefix with an ID like `REQ-001:`",
@@ -239,7 +228,7 @@ CRITICAL RULES:
 - OUTPUT: the single rewritten sentence ONLY (no lists, no commentary).
 
 Requirement:
-"""{(req_text or '').strip()}""""""
+\"\"\"{(req_text or '').strip()}\"\"\""""
 
     def _ai_decompose_prompt(parent_id: str, cleaned_sentence: str) -> str:
         # minimal children 2–4; preserve numbers/units; strict IDing
@@ -254,11 +243,11 @@ RULES:
 {parent_id}.n: <child shall sentence>
 
 Parent requirement:
-"""{cleaned_sentence.strip()}""""""
+\"\"\"{cleaned_sentence.strip()}\"\"\""""
 
     # ---- Local AI helpers ----------------------------------------------------
     def _ai_rewrite_clarity(api_key: str, req_text: str) -> str:
-        out = get_ai_suggestion_safe(api_key, _ai_rewrite_prompt(req_text)) or ""
+        out = get_ai_suggestion(api_key, _ai_rewrite_prompt(req_text)) or ""
         # return first non-empty line
         for ln in out.splitlines():
             ln = ln.strip()
@@ -428,8 +417,7 @@ Parent requirement:
         cqa[3].metric("Multiple actions", issue_counts["Singularity"])
 
         # --- bulk buttons (Quick Paste) ---
-        api_key = st.session_state.get("api_key")
-        if api_key:
+        if st.session_state.api_key:
             cols_bulk = st.columns([1.3, 1.9])
             with cols_bulk[0]:
                 if st.button("✨ Rewrite all flagged (AI)", key="quick_rewrite_all"):
@@ -438,7 +426,7 @@ Parent requirement:
                             r for r in quick_results
                             if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
                         ]
-                        rew_count = _ai_batch_rewrite(api_key, flagged_list_for_rewrite)
+                        rew_count = _ai_batch_rewrite(st.session_state.api_key, flagged_list_for_rewrite)
                     st.success(f"Rewrote {rew_count} requirement(s).")
             with cols_bulk[1]:
                 if st.button("⚡ Rewrite & Decompose all flagged (AI)", key="quick_rewrite_decomp_all"):
@@ -447,7 +435,9 @@ Parent requirement:
                             r for r in quick_results
                             if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
                         ]
-                        rew_count, dec_count = _ai_batch_rewrite_and_decompose(api_key, flagged_list_for_action)
+                        rew_count, dec_count = _ai_batch_rewrite_and_decompose(
+                            st.session_state.api_key, flagged_list_for_action
+                        )
                     st.success(f"Rewrote {rew_count} and decomposed {dec_count} requirement(s).")
         else:
             st.caption("ℹ️ Enter your Google AI API key to enable bulk AI rewrites/decomposition.")
@@ -475,7 +465,7 @@ Parent requirement:
                 has_sing = bool(r.get("singularity"))
                 only_sing = has_sing and not (has_amb or has_pas or has_inc)
 
-                if api_key:
+                if st.session_state.api_key:
                     if only_sing:
                         # ONLY Not Singular -> show only Decompose
                         cols = st.columns(1)
@@ -483,7 +473,7 @@ Parent requirement:
                             if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_only_{r['id']}"):
                                 try:
                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
-                                    d = _ai_decompose_children(api_key, r["id"], base)
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
                                     if d.strip():
                                         key = f"decomp_cache_{r['id']}"
                                         existing = st.session_state.get(key, "").strip()
@@ -500,7 +490,7 @@ Parent requirement:
                         with cols[0]:
                             if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"):
                                 try:
-                                    suggestion = _ai_rewrite_clarity(api_key, r['text'])
+                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
                                     st.info("Rewritten:")
                                     st.markdown(f"> {suggestion}")
@@ -510,7 +500,7 @@ Parent requirement:
                             if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"):
                                 try:
                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
-                                    d = _ai_decompose_children(api_key, r["id"], base)
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
                                     if d.strip():
                                         key = f"decomp_cache_{r['id']}"
                                         existing = st.session_state.get(key, "").strip()
@@ -523,9 +513,9 @@ Parent requirement:
                         with cols[2]:
                             if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"):
                                 try:
-                                    cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(api_key, r["text"])
+                                    cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
-                                    d = _ai_decompose_children(api_key, r["id"], cleaned)
+                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], cleaned)
                                     if d.strip():
                                         key = f"decomp_cache_{r['id']}"
                                         existing = st.session_state.get(key, "").strip()
@@ -544,7 +534,7 @@ Parent requirement:
                         with cols[0]:
                             if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_only_{r['id']}"):
                                 try:
-                                    suggestion = _ai_rewrite_clarity(api_key, r['text'])
+                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
                                     st.info("Rewritten:")
                                     st.markdown(f"> {suggestion}")
@@ -618,7 +608,7 @@ Parent requirement:
     # ===================== Full Document Analyzer =============================
     st.subheader("📁 Upload Documents — analyze one or more files")
     use_ai_parser = st.toggle("Use Advanced AI Parser (requires API key)")
-    if use_ai_parser and not (HAS_AI_PARSER and st.session_state.get("api_key")):
+    if use_ai_parser and not (HAS_AI_PARSER and st.session_state.api_key):
         st.info("AI Parser not available (missing function or API key). Falling back to Standard Parser.")
 
     project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
@@ -665,7 +655,7 @@ Parent requirement:
     if selected_example != "Choose an example...":
         example_path = example_files[selected_example]
         try:
-            if example_path and example_path.endswith(".docx"):
+            if example_path.endswith(".docx"):
                 d = docx.Document(example_path)
                 example_text = "\n".join([p.text for p in d.paragraphs if p.text.strip()])
             else:
@@ -680,7 +670,7 @@ Parent requirement:
 
     # === Analyzer-local AI helpers (shared) ===================================
     def _ai_rewrite_clarity_doc(api_key: str, req_text: str) -> str:
-        out = get_ai_suggestion_safe(st.session_state.get("api_key"), _ai_rewrite_prompt(req_text)) or ""
+        out = get_ai_suggestion(st.session_state.api_key, _ai_rewrite_prompt(req_text)) or ""
         for ln in out.splitlines():
             ln = ln.strip()
             if ln:
@@ -693,6 +683,7 @@ Parent requirement:
 
     if docs_to_process:
         with st.spinner("Processing and analyzing documents..."):
+            saved_count = 0
             for src_type, display_name, payload in docs_to_process:
                 # --- Extract requirements (AI + standard + table) and merge/dedupe ---
                 std_reqs, table_reqs, ai_reqs = [], [], []
@@ -701,34 +692,34 @@ Parent requirement:
                     if payload.name.endswith(".txt"):
                         raw = payload.getvalue().decode("utf-8", errors="ignore")
                         std_reqs = extract_requirements_from_string(raw) or []
-                        if use_ai_parser and HAS_AI_PARSER and st.session_state.get("api_key"):
-                            ai_reqs = extract_requirements_with_ai(st.session_state.get("api_key"), raw) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or []
                     elif payload.name.endswith(".docx"):
                         flat_text, table_rows = _read_docx_text_and_rows(payload)
                         table_reqs = _extract_requirements_from_table_rows(table_rows) or []
                         std_reqs = extract_requirements_from_string(flat_text) or []
-                        if use_ai_parser and HAS_AI_PARSER and st.session_state.get("api_key"):
-                            ai_reqs = extract_requirements_with_ai(st.session_state.get("api_key"), flat_text) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or []
                 elif src_type == "stored":
                     path = payload
                     if path.endswith(".txt"):
                         with open(path, "r", encoding="utf-8", errors="ignore") as f:
                             raw = f.read()
                         std_reqs = extract_requirements_from_string(raw) or []
-                        if use_ai_parser and HAS_AI_PARSER and st.session_state.get("api_key"):
-                            ai_reqs = extract_requirements_with_ai(st.session_state.get("api_key"), raw) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, raw) or []
                     elif path.endswith(".docx"):
                         flat_text, table_rows = _read_docx_text_and_rows_from_path(path)
                         table_reqs = _extract_requirements_from_table_rows(table_rows) or []
                         std_reqs = extract_requirements_from_string(flat_text) or []
-                        if use_ai_parser and HAS_AI_PARSER and st.session_state.get("api_key"):
-                            ai_reqs = extract_requirements_with_ai(st.session_state.get("api_key"), flat_text) or []
+                        if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                            ai_reqs = extract_requirements_with_ai(st.session_state.api_key, flat_text) or []
                 else:  # example
                     std_reqs = extract_requirements_from_string(payload) or []
-                    if use_ai_parser and HAS_AI_PARSER and st.session_state.get("api_key"):
-                        ai_reqs = extract_requirements_with_ai(st.session_state.get("api_key"), payload) or []
+                    if use_ai_parser and HAS_AI_PARSER and st.session_state.api_key:
+                        ai_reqs = extract_requirements_with_ai(st.session_state.api_key, payload) or []
 
-                # Merge + dedupe => correct counts, no spurious inflation
+                #           Merge + dedupe => correct counts, no spurious inflation
                 reqs = _merge_unique_reqs(table_reqs, std_reqs, ai_reqs)
                 total_reqs = len(reqs)
                 if total_reqs == 0:
@@ -815,7 +806,6 @@ Parent requirement:
                         st.warning(f"Saved analysis for **{display_name}**, but DB write failed: {e}")
 
                 # --- Per-document results UI -----------------------------------------
-              
                 with st.expander(f"📄 {display_name} — Clarity {clarity_score}/100 • {total_reqs} requirements"):
                     flagged_total = sum(
                         1 for r in results
@@ -1073,4 +1063,3 @@ Parent requirement:
                 st.info("get_documents_for_project() not found in db.database.")
         except Exception as e:
             st.error(f"Failed to load documents for this project: {e}")
-
