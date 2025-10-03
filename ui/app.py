@@ -1,3 +1,4 @@
+# ui/app.py
 import streamlit as st
 import sys
 import os
@@ -15,6 +16,30 @@ ENABLE_FLOATING_CHAT = False  # keep inline, not floating
 
 # Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# ------------------------- spaCy: safe, top-level loader -------------------------
+# Ensures the model is available in Streamlit Cloud even if the env changes.
+# Requirements: include the wheel line in requirements.txt:
+# en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+NLP_STATUS = "loading"
+try:
+    import en_core_web_sm as _en_core_web_sm
+    nlp = _en_core_web_sm.load()
+    NLP_STATUS = "en_core_web_sm (package) loaded"
+except Exception:
+    try:
+        import spacy
+        try:
+            nlp = spacy.load("en_core_web_sm")
+            NLP_STATUS = "en_core_web_sm (spacy.load) loaded"
+        except OSError:
+            from spacy.cli import download
+            download("en_core_web_sm")
+            nlp = spacy.load("en_core_web_sm")
+            NLP_STATUS = "en_core_web_sm downloaded & loaded"
+    except Exception as _e:
+        nlp = None
+        NLP_STATUS = f"spaCy unavailable: {_e}"
 
 # ------------------------- Imports from your app -------------------------
 from core.analyzer import (
@@ -54,7 +79,6 @@ get_chatbot_response = getattr(
         ) + "\nASSISTANT:"
     ),
 )
-
 
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
@@ -290,30 +314,24 @@ with st.sidebar:
     # Catchphrase (pick one from below)
     st.markdown("**Clarity in requirements. Confidence in delivery.**")
 
+    # spaCy status (helpful while debugging deployments)
+    st.caption(f"🔤 spaCy model status: **{NLP_STATUS}**")
+
     # --- CSS: make sidebar a full-height flex column
     st.markdown("""
     <style>
       section[data-testid="stSidebar"] .stSidebarContent {
-        display: flex;                /* column layout */
+        display: flex;
         flex-direction: column;
-        min-height: 100vh;            /* fill viewport height */
+        min-height: 100vh;
       }
-      .sb-spacer {
-        flex: 1 1 auto;               /* invisible flexible spacer */
-      }
-      /* Optional: guarantee some space even on very short viewports */
-      .sb-spacer.min { min-height: 30vh; }  /* tweak 30vh as you like */
-
-      #sb-footer {
-        padding-top: .75rem;
-        border-top: 1px solid rgba(0,0,0,.08);
-      }
+      .sb-spacer { flex: 1 1 auto; }
+      .sb-spacer.min { min-height: 30vh; }
+      #sb-footer { padding-top: .75rem; border-top: 1px solid rgba(0,0,0,.08); }
       #sb-footer a { text-decoration: none; }
       #sb-footer a:hover { text-decoration: underline; }
     </style>
     """, unsafe_allow_html=True)
-
-    # (Place any future sidebar controls ABOVE the spacer)
 
     # Invisible spacer that expands to push footer down
     st.markdown("<div class='sb-spacer min'></div>", unsafe_allow_html=True)
@@ -328,7 +346,6 @@ with st.sidebar:
       <div>📧 <b>reqcheck.dev@gmail.com</b></div>
     </div>
     """, unsafe_allow_html=True)
-
 
 st.title("✨ ReqCheck: AI-Powered Requirements Assistant")
 
@@ -536,7 +553,7 @@ try:
 except Exception as e:
     st.error(f"Chat tab failed to import: {e}")
 
-with main_col:
+with st.columns([4, 1], gap="large")[0]:
     tab_home, tab_analyze, tab_need, tab_chat = st.tabs([
         "🏠 Home",
         "📄 Document Analyzer",
@@ -544,6 +561,7 @@ with main_col:
         "💬 Requirements Chatbot",
     ])
 
+# Context object passed to tabs (includes spaCy nlp)
 CTX = {
     "HAS_AI_PARSER": HAS_AI_PARSER,
     "get_ai_suggestion": get_ai_suggestion,
@@ -565,6 +583,7 @@ CTX = {
     "safe_clarity_score": safe_clarity_score,
     "_save_uploaded_file_for_doc": _save_uploaded_file_for_doc,
     "_sanitize_filename": _sanitize_filename,
+    "nlp": nlp,  # <--- make spaCy available to tabs
 }
 
 with tab_home:
