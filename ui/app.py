@@ -553,7 +553,7 @@ try:
 except Exception as e:
     st.error(f"Chat tab failed to import: {e}")
 
-with st.columns([4, 1], gap="large")[0]:
+with main_col:
     tab_home, tab_analyze, tab_need, tab_chat = st.tabs([
         "🏠 Home",
         "📄 Document Analyzer",
@@ -609,4 +609,5 @@ with tab_chat:
         chat_tab.render(st, db, rule_engine, CTX)
     else:
         st.error("Chat tab not available.")
+
 
