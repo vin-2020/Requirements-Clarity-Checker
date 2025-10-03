@@ -315,7 +315,7 @@ with st.sidebar:
     st.markdown("**Clarity in requirements. Confidence in delivery.**")
 
     # spaCy status (helpful while debugging deployments)
-    st.caption(f"🔤 spaCy model status: **{NLP_STATUS}**")
+    #st.caption(f"🔤 spaCy model status: **{NLP_STATUS}**")
 
     # --- CSS: make sidebar a full-height flex column
     st.markdown("""
@@ -609,5 +609,6 @@ with tab_chat:
         chat_tab.render(st, db, rule_engine, CTX)
     else:
         st.error("Chat tab not available.")
+
 
 
