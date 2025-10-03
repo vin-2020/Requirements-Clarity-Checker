@@ -3,10 +3,8 @@
 Lightweight helpers for ReqCheck's AI features (Gemini via google.generativeai).
 
 IMPORTANT:
-- Functionality is unchanged from your original file.
-- Streamlit caching (@st.cache_data) is kept exactly as-is per your request.
-- Prompts and model names are identical (except the new extractor's robust JSON prompt).
-- Only formatting, structure, and comments/docstrings were improved.
+- Streamlit caching (@st.cache_data) is preserved.
+- Adds run_freeform(...) for prompts that need multi-line / JSON output.
 """
 
 import streamlit as st
@@ -15,32 +13,34 @@ import json
 import re
 from typing import List, Tuple
 
+# ----------------------------- Core helpers -----------------------------
+
+@st.cache_data
+def run_freeform(api_key: str, prompt: str) -> str:
+    """
+    Generic freeform call: sends your prompt AS-IS and returns raw model text.
+    Use this for prompts that expect multi-line lists, JSON, or JSON Lines.
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        resp = model.generate_content(prompt)
+        return (getattr(resp, "text", "") or "").strip()
+    except Exception:
+        # IMPORTANT: return empty string, never an error blob (callers handle retries/repairs)
+        return ""
+
 
 @st.cache_data
 def get_ai_suggestion(api_key, requirement_text):
     """
     Ask Gemini to rewrite a requirement for clarity and testability.
-
-    Parameters
-    ----------
-    api_key : str
-        Google Generative AI API key.
-    requirement_text : str
-        The original requirement text to be rewritten.
-
-    Returns
-    -------
-    str
-        The model's rewritten requirement, or an error message.
+    (Single-sentence polish helper; keep for the 🪄 Rewrite button.)
     """
     try:
-        # Configure Gemini client with the provided API key
         genai.configure(api_key=api_key)
-
-        # Model choice kept exactly as in your original code
         model = genai.GenerativeModel('gemini-2.5-flash')
 
-        # --- NEW, highly-detailed INCOSE-aligned prompt you provided ---
         prompt = f"""
         You are a lead Systems Engineer acting as a mentor. Your task is to review and rewrite a single requirement statement to make it exemplary.
 
@@ -57,13 +57,10 @@ def get_ai_suggestion(api_key, requirement_text):
         
         Rewritten Requirement:
         """
-
-        # Single-turn content generation
         response = model.generate_content(prompt)
         return response.text.strip()
 
     except Exception as e:
-        # Return string (not raising) to match existing behavior
         return f"An error occurred with the AI service: {e}"
 
 
@@ -72,27 +69,11 @@ def generate_requirement_from_need(api_key, need_text):
     """
     Convert an informal stakeholder need into a structured requirement
     or ask a clarifying question if the need is too vague.
-
-    Parameters
-    ----------
-    api_key : str
-        Google Generative AI API key.
-    need_text : str
-        Stakeholder need in plain language.
-
-    Returns
-    -------
-    str
-        A structured requirement or a clarifying question, or an error message.
     """
     try:
-        # Configure Gemini client with the provided API key
         genai.configure(api_key=api_key)
-
-        # Model choice kept exactly as in your original code
         model = genai.GenerativeModel('gemini-2.5-flash')
 
-        # Prompt kept identical to preserve behavior/outputs
         prompt = f"""
         You are a Systems Engineer creating a formal requirement from a stakeholder's informal need.
         Convert the following need into a structured requirement with the format:
@@ -104,13 +85,10 @@ def generate_requirement_from_need(api_key, need_text):
 
         Structured Requirement or Clarifying Question:
         """
-
-        # Single-turn content generation
         response = model.generate_content(prompt)
         return response.text.strip()
 
     except Exception as e:
-        # Return string (not raising) to match existing behavior
         return f"An error occurred with the AI service: {e}"
 
 
@@ -118,38 +96,15 @@ def generate_requirement_from_need(api_key, need_text):
 def get_chatbot_response(api_key, chat_history):
     """
     Get a conversational reply from Gemini based on the entire chat history.
-
-    NOTE: The format of `chat_history` is expected to be the same one your
-    Streamlit app builds (e.g., a list of role/parts dicts or a compatible structure).
-    This function forwards it directly to the model.
-
-    Parameters
-    ----------
-    api_key : str
-        Google Generative AI API key.
-    chat_history : Any
-        Conversation history object passed straight to model.generate_content().
-
-    Returns
-    -------
-    str
-        The assistant's response text, or an error message.
     """
     try:
-        # Configure Gemini client with the provided API key
         genai.configure(api_key=api_key)
-
-        # Model choice kept exactly as in your original code
         model = genai.GenerativeModel('gemini-2.5-flash')
-
-        # Directly pass the provided history (unchanged behavior)
         response = model.generate_content(chat_history)
         return response.text.strip()
 
     except Exception as e:
-        # Return string (not raising) to match existing behavior
         return f"An error occurred with the AI service: {e}"
-
 
 # --- NEW: AI Requirement Extractor (full JSON-based, robust) ---
 @st.cache_data
@@ -161,20 +116,13 @@ def extract_requirements_with_ai(
     """
     Use the LLM to extract ONLY requirement statements from raw text.
     Returns: list of (req_id, req_text)
-
-    - Strongly prefers STRICT JSON output from the model.
-    - Handles documents without tables, mixed numbering, and narrative prose.
-    - Falls back to heuristic extraction if JSON parsing fails.
-    - Deduplicates by text (case-insensitive).
     """
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception:
-        # Keep behavior consistent: return empty on config failure
         return []
 
-    # ---- Chunk large documents on blank lines to stay well under context limits ----
     paras = re.split(r"\n\s*\n", document_text or "")
     chunks, buf = [], ""
     for p in paras:
@@ -190,9 +138,7 @@ def extract_requirements_with_ai(
     out: List[Tuple[str, str]] = []
     running_index = 1
 
-    # ---- Helper: parse model JSON or fallback ----
     def _parse_or_fallback(resp_text: str) -> List[Tuple[str, str]]:
-        # Try to grab the last JSON object in the output
         json_text = None
         m = re.search(r"\{.*\}\s*$", resp_text or "", flags=re.S)
         if m:
@@ -213,11 +159,8 @@ def extract_requirements_with_ai(
                 if pairs:
                     return pairs
             except Exception:
-                # fall through to heuristic
                 pass
 
-        # Heuristic fallback on the model output:
-        # 1) Bullet/numbered lines
         heur_pairs: List[Tuple[str, str]] = []
         bullets = re.findall(r"^\s*(?:-|\*|\d+[\.\)])\s*(.+)$", resp_text or "", flags=re.M)
         for b in bullets:
@@ -225,12 +168,11 @@ def extract_requirements_with_ai(
             if t:
                 heur_pairs.append(("", t))
 
-        # 2) Normative sentences (look for optional ID and normative keywords)
         norm_pat = re.compile(
             r"""(?ix)
             ^
             (?:
-                (?P<id>[A-Z][A-Z0-9-]*-\d+|[A-Z]{2,}\d+|\d+[\.\)])\s+    # e.g., ABC-123, SYS-001, 1., 1)
+                (?P<id>[A-Z][A-Z0-9-]*-\d+|[A-Z]{2,}\d+|\d+[\.\)])\s+
             )?
             (?P<text>.*?\b(shall|must|will|should)\b.*)
             $
@@ -249,9 +191,7 @@ def extract_requirements_with_ai(
 
         return heur_pairs
 
-    # ---- Process each chunk with a strict-JSON prompt ----
     for ch in (chunks if chunks else [""]):
-
         prompt = f"""
 You are an expert Systems Engineer and requirements analyst.
 
@@ -284,12 +224,10 @@ TEXT:
         for rid, rtx in pairs:
             if not rtx:
                 continue
-            # If the model didn't provide an id, synthesize one (stable within this call)
             final_id = rid.strip() if rid.strip() else f"R-{running_index:03d}"
             out.append((final_id, rtx.strip()))
             running_index += 1
 
-    # ---- If still empty, last-resort heuristic on the ORIGINAL document_text ----
     if not out and (document_text or "").strip():
         norm = re.compile(
             r'(?im)^(?:(?P<id>[A-Z][A-Z0-9-]*-\d+|\d+[.)])\s+)?(?P<txt>.*?\b(shall|must|will|should)\b.*)$'
@@ -304,7 +242,6 @@ TEXT:
                     out.append((rid, txt))
                     idx += 1
 
-    # ---- Deduplicate by requirement text (case-insensitive) ----
     seen = set()
     unique: List[Tuple[str, str]] = []
     for rid, txt in out:
@@ -316,50 +253,138 @@ TEXT:
 
     return unique
 
-
 @st.cache_data
 def decompose_requirement_with_ai(api_key, requirement_text):
     """
     Uses the Gemini LLM to decompose a complex requirement into multiple singular requirements.
-    Returns a plain numbered list string.
+    Returns a plain list of lines, each: 'The system shall ...'.
     """
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
 
         prompt = f"""
-        You are an expert Systems Engineer. Your task is to analyze the following requirement.
-        If it is not singular, decompose it into a set of clear, singular, and verifiable requirements.
+Split the compound requirement below into 3–8 singular, verifiable requirements.
 
-        CRITICAL INSTRUCTIONS:
-        1. Analyze the original requirement to identify all distinct ideas (actions, constraints, metrics).
-        2. Rewrite each idea as its own requirement in active voice: "The system shall ...".
-        3. Each requirement must be a single sentence and testable.
-        4. If the original requirement has an ID (e.g., "SYS-001"), assign incremental child IDs (e.g., "SYS-001.1", "SYS-001.2").
-        5. Ensure **scope control**: do not add new conditions beyond the original requirement unless they are logically implied. If unsure, keep the decomposition minimal.
-        6. Ensure **consistency**: separate system capability requirements from process/documentation requirements. Do not mix them in the same sentence.
-        7. Ensure **normative language**: use "shall". Only upgrade "should" to "shall" if the intent is clearly mandatory.
-        8. OUTPUT FORMAT: Return ONLY a numbered list, one item per line, with no extra commentary or markdown.
+RULES
+- Return ONLY the final lines, one per line.
+- Each line MUST be: "The system shall ...".
+- ≤ 22 words per line; active voice; include measurable criteria where meaningful.
+- No bullets, numbering, IDs, or extra text.
 
-        Original Requirement: "{requirement_text}"
-        """
-
+INPUT
+\"\"\"{(requirement_text or '').strip()}\"\"\""""
         resp = model.generate_content(prompt)
-        out = (getattr(resp, "text", "") or "").strip()
-        return out if out else "No decomposition produced."
+        raw = (getattr(resp, "text", "") or "").strip()
+        lines = [re.sub(r"^[\-\*\d\)\.]+\s*", "", ln.strip()) for ln in raw.splitlines() if ln.strip()]
+        out = []
+        for ln in lines:
+            if " shall " not in f" {ln.lower()} ":
+                continue
+            out.append(ln.rstrip(".") + ".")
+        return "\n".join(out[:8]) if out else "No decomposition produced."
     except Exception as e:
         return f"An error occurred with the AI service: {e}"
-# ------------------------------
-# Structured helpers for Req Tutor (non-breaking additions)
-# ------------------------------
-import json
-import re
+
+# ---------------------- Dense-Need → Requirement Set ----------------------
+@st.cache_data
+def decompose_need_into_requirements(api_key: str, need_text: str) -> str:
+    """
+    Systematically decomposes a dense stakeholder need into a numbered list of
+    singular, verifiable 'The system shall ...' requirements with REQ-xxx IDs.
+    """
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+    except Exception as e:
+        return f"An error occurred with the AI service: {e}"
+
+    def _call_model(prompt: str) -> str:
+        try:
+            resp = model.generate_content(prompt)
+            return (resp.text or "").strip()
+        except Exception as e:
+            return f"__ERR__ {e}"
+
+    base_prompt = f"""
+You are a senior systems engineer following INCOSE practices.
+
+TASK
+1) ANALYZE the Stakeholder Need and identify every distinct capability, constraint, resource limit, failure/fault tolerance, timing window, environmental/operational condition, interface/safety/compliance.
+2) DECOMPOSE into a set of singular, verifiable system requirements.
+
+STRICT OUTPUT FORMAT
+- Return ONLY the final list of requirements, one per line.
+- Each line MUST start with a unique ID like "REQ-001." followed by a single sentence in active voice: "The system shall ...".
+- Each requirement must be singular, testable/verifiable, and measurable (numbers/units or crisp thresholds when meaningful).
+- ≤ 26 words per sentence. Avoid lists inside a requirement.
+- Do NOT include analysis notes, headings, bullets, or commentary. FINAL LIST ONLY.
+
+STAKEHOLDER NEED
+"""
+    base_prompt += f'\"\"\"{(need_text or "").strip()}\"\"\"'
+
+    raw = _call_model(base_prompt)
+
+    def _normalize_lines(text: str) -> list[str]:
+        if not text or text.startswith("__ERR__"):
+            return []
+        lines = [re.sub(r"^[\-\*\d\)\.]+\s*", "", ln.strip()) for ln in text.splitlines() if ln.strip()]
+        out = []
+        for ln in lines:
+            if " shall " not in f" {ln.lower()} ":
+                continue
+            m = re.match(r"^(REQ-\d{3,4})[.\s:-]\s*(.*)$", ln, flags=re.I)
+            if m:
+                rid = m.group(1).upper()
+                body = m.group(2).strip()
+                ln = f"{rid}. {body}"
+            out.append(ln.rstrip(".") + ".")
+        seen = set()
+        uniq = []
+        for ln in out:
+            k = re.sub(r"\s+", " ", ln.lower())
+            if k not in seen:
+                seen.add(k)
+                uniq.append(ln)
+        return uniq
+
+    lines = _normalize_lines(raw)
+
+    if len(lines) < 8:
+        repair_prompt = f"""
+Your previous answer did not cover the full scope or enough requirements.
+
+REPAIR:
+- Rewrite into 8–16 distinct, singular, verifiable requirements.
+- EXACTLY the format: "REQ-001. The system shall ...".
+- One per line. No commentary, no bullets, no headings.
+- Keep ≤ 26 words per sentence; include measurable criteria when meaningful.
+
+STAKEHOLDER NEED
+\"\"\"{(need_text or '').strip()}\"\"\"\n
+YOUR PRIOR ANSWER
+\"\"\"{raw}\"\"\""""
+        raw2 = _call_model(repair_prompt)
+        lines2 = _normalize_lines(raw2)
+        if len(lines2) >= len(lines):
+            lines = lines2
+
+    if not lines:
+        return "An error occurred with the AI service: empty response from model"
+
+    out = []
+    for i, ln in enumerate(lines[:20], 1):
+        body = re.sub(r"^REQ-\d{3,4}[.\s:-]\s*", "", ln, flags=re.I).strip()
+        out.append(f"REQ-{i:03d}. {body}")
+    return "\n".join(out)
+
+# ------------------------------ Req Tutor helpers ------------------------------
 
 def _extract_json_or_none(text: str):
     """Try to parse JSON; tolerate code fences and trailing prose."""
     if not text:
         return None
-    # strip common fences
     m = re.search(r'\{.*\}', text, flags=re.DOTALL)
     candidate = m.group(0) if m else text.strip()
     try:
@@ -379,7 +404,6 @@ def _kv_lines_to_dict(text: str) -> dict:
                 out[k] = v
     return out
 
-# Keys expected by template type
 _NEED_AUTOFILL_FIELDS = {
     "Functional": ["Actor","Action","Object","Trigger","Conditions","Performance","ModalVerb"],
     "Performance": ["Function","Metric","Threshold","Unit","Conditions","Measurement","VerificationMethod"],
@@ -397,14 +421,12 @@ def analyze_need_autofill(api_key: str, need_text: str, req_type: str) -> dict:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
     except Exception:
-        # fail-safe: return empty skeleton
         fields = _NEED_AUTOFILL_FIELDS.get(req_type or "Functional", _NEED_AUTOFILL_FIELDS["Functional"])
         return {k: "" for k in fields}
 
     req_type = (req_type or "Functional").strip()
     fields = _NEED_AUTOFILL_FIELDS.get(req_type, _NEED_AUTOFILL_FIELDS["Functional"])
 
-    # Few-shot anchors
     if req_type == "Functional":
         fewshot = """Example (Functional, JSON only):
 {"Actor":"UAV","Action":"present","Object":"low-battery alert to operator","Trigger":"battery state-of-charge < 20%","Conditions":"in all flight modes","Performance":"within 1 s","ModalVerb":"shall"}"""
@@ -437,22 +459,18 @@ Guidance:
 
 {fewshot}
 """
-
     try:
         resp = model.generate_content(prompt)
         raw = (getattr(resp, "text", "") or "").strip()
     except Exception:
         raw = ""
 
-    # Parse JSON strictly; fallback to Key: value lines
     data = _extract_json_or_none(raw)
     if data is None or not isinstance(data, dict):
         data = _kv_lines_to_dict(raw)
 
-    # Build skeleton and copy values
     out = {k: (data.get(k, "") if isinstance(data, dict) else "") for k in fields}
 
-    # --------- Light post-processing for quality ----------
     def _ban_vague_phrases(txt: str) -> str:
         banned = ["all specified", "as needed", "as soon as possible", "etc.", "including but not limited to"]
         t = (txt or "")
@@ -499,7 +517,6 @@ Guidance:
             return (f"{conds} " + " ".join(bits)).strip() if conds else " ".join(bits)
         return conds
 
-    # Enums normalization
     if "ModalVerb" in out:
         mv = (out["ModalVerb"] or "shall").lower()
         out["ModalVerb"] = mv if mv in ("shall","will","must") else "shall"
@@ -510,7 +527,6 @@ Guidance:
         dr = (out["Direction"] or "")
         out["Direction"] = dr if dr in ("In","Out","Bi-directional") else "Bi-directional"
 
-    # Apply quality polish by type
     if req_type == "Functional":
         out["Object"], out["Performance"] = _strip_perf_from_object(out.get("Object",""), out.get("Performance",""))
         out["Object"] = _ban_vague_phrases(out.get("Object",""))
@@ -524,11 +540,10 @@ Guidance:
 
     return out
 
-
 def review_requirement_with_ai(api_key: str, requirement_text: str, preferred_verification: str | None = None) -> dict:
     """
     Return {"review": str, "acceptance": [str, ...]}.
-    JSON-first with graceful fallback if the model emits text.
+    Uses freeform call to preserve the JSON response.
     """
     pv = preferred_verification if preferred_verification in ("Test","Analysis","Inspection","Demonstration") else ""
     hint = f' "preferredVerification": "{pv}",' if pv else ""
@@ -547,16 +562,12 @@ Return ONLY this JSON (no extra text, no code fences):
 }}
 
 Requirement:
-\"\"\"{(requirement_text or '').strip()}\"\"\"
-"""
-
-    raw = get_ai_suggestion(api_key, prompt)
+\"\"\"{(requirement_text or '').strip()}\"\"\""""
+    raw = run_freeform(api_key, prompt)
     data = _extract_json_or_none(raw)
     if not isinstance(data, dict):
-        # fallback: wrap the raw text as a single acceptance block
         return {"review": raw.strip(), "acceptance": []}
 
-    # shape and defaults
     review = str(data.get("review", "")).strip()
     acceptance = data.get("acceptance", [])
     if not isinstance(acceptance, list):
