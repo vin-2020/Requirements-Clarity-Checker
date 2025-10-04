@@ -1,3 +1,5 @@
+
+
 # ui/tabs/need_tab.py
 from __future__ import annotations
 
@@ -20,22 +22,16 @@ def _llm_retry(api_fn: Callable[[str], str], prompt: str, retries: int = 1, back
     """
     AI-only: we DO NOT fall back to local templates. If the provider fails, we surface the error.
     """
-    import re
-
     def retriable(msg: str) -> bool:
         m = (msg or "").lower()
-        # Only treat *actual* transient/server errors as retriable.
+        # Only match real service/transport errors, not common words like "rate"
         patterns = [
-            r"\b429\b",
-            r"quota",
-            r"rate[\s-]?limit",          # rate limit / rate-limit / ratelimit
-            r"deadline exceeded",
-            r"timeout",
-            r"\b500\b",
-            r"\b503\b",
-            r"internal(?: server)? error",
+            "429", "quota exceeded", "rate limit", "rate-limited",
+            "deadline exceeded", "timed out", "timeout",
+            "unavailable", "503", "overloaded",
+            "internal server error", "server error"
         ]
-        return any(re.search(p, m) for p in patterns)
+        return any(p in m for p in patterns)
 
     last = ""
     for i in range(retries + 1):
@@ -51,6 +47,7 @@ def _llm_retry(api_fn: Callable[[str], str], prompt: str, retries: int = 1, back
                 continue
             st.error(f"AI service error: {last}")
             return ""
+
 
 
 # ----------------- Need normalizer --------------------------
@@ -439,6 +436,23 @@ def render(st, db, rule_engine, CTX):
     # NEW: dense-need decomposition hook
     decompose_need_into_requirements = CTX.get("decompose_need_into_requirements", lambda *a, **k: "")
 
+    # Prefer engine-level ambiguity checker if available; otherwise fall back to CTX helper.
+    def _ambig(text: str) -> list:
+        try:
+            if hasattr(rule_engine, "check_ambiguity"):
+                out = rule_engine.check_ambiguity(text)
+                return out or []
+        except Exception:
+            pass
+        try:
+            return safe_call_ambiguity(text, rule_engine) or []
+        except TypeError:
+            # some CTX implementations expect only the text
+            return safe_call_ambiguity(text, None) or []
+        except Exception:
+            return []
+
+
     # ---------- State ----------
     if "need_ui" not in st.session_state:
         st.session_state.need_ui = {}
@@ -500,15 +514,14 @@ def render(st, db, rule_engine, CTX):
     # ---------- Helpers ----------
     def _qc(text: str):
         try:
-            amb = safe_call_ambiguity(text, rule_engine)
-        except TypeError:
-            amb = safe_call_ambiguity(text, None)
+            amb = _ambig(text)
         except Exception:
             amb = []
         pas = check_passive_voice(text)
         inc = check_incompleteness(text)
         sing = check_singularity(text)
         return amb, pas, inc, sing
+
 
     def _badge_row(text: str) -> str:
         amb, pas, inc, sing = _qc(text)
