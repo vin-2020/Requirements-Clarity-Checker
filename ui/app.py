@@ -55,6 +55,7 @@ get_chatbot_response = getattr(
     ),
 )
 
+
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
     lambda api_key, requirement_text: "Decomposition helper failed to load."
@@ -212,6 +213,7 @@ def format_requirement_with_highlights(req_id, req_text, issues):
         f'border-radius:5px;margin-bottom:10px;">{display_html}</div>'
     )
 
+
 def safe_call_ambiguity(text: str, engine: RuleEngine | None):
     """
     Prefer the JSON-driven RuleEngine.check_ambiguity() so new rules apply.
@@ -241,6 +243,8 @@ def safe_call_ambiguity(text: str, engine: RuleEngine | None):
     except Exception as e:
         st.session_state["dbg_ambiguity_error"] = f"legacy: {e}"
         return []
+
+
 
 def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, engine: RuleEngine | None = None):
     try:
@@ -304,7 +308,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .req-container { padding:10px;border-radius:5px;margin-bottom:10px;border:1px solid #ddd; }
+    .req-column { padding:10px;border-radius:5px;margin-bottom:10px;border:1px solid #ddd; }
     .flagged { background:#FFF3CD;color:#856404;border-color:#FFEEBA; }
     .clear { background:#D4EDDA;color:#155724;border-color:#C3E6CB; }
     .highlight-ambiguity { background:#FFFF00;color:black;padding:2px 4px;border-radius:3px; }
@@ -313,14 +317,21 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- One RuleEngine instance (cloud-safe; uses repo rules file) ----
-rule_engine = RuleEngine("data/default_rules.json")
+# Instantiate RuleEngine **before** using it in diagnostics
+from pathlib import Path
+from core.rule_engine import RuleEngine
+
+# Point exactly to your file
+RULES_PATH = Path(r"C:\Users\vinodh\OneDrive\Desktop\REQCHECKCODE_BACKUP\data\default_rules.json")
+rule_engine = RuleEngine(str(RULES_PATH))
+
+
 
 with st.sidebar:
     # Top: logo
     st.image(
         "https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true",
-        use_column_width=True  # <-- fixed kwarg
+        use_column_width=True
     )
 
     # Catchphrase (pick one from below)
@@ -365,6 +376,7 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+
 st.title("✨ ReqCheck: AI-Powered Requirements Assistant")
 
 # ✅ Initialize the database on first run (DB memory)
@@ -386,6 +398,10 @@ if api_key_input:
 if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
 st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
+
+# One RuleEngine instance (real or stub)
+rule_engine = RuleEngine()
+
 
 # ======================= Layout: main + right panel =======================
 main_col, right_col = st.columns([4, 1], gap="large")
