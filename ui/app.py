@@ -313,8 +313,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- One RuleEngine instance (cloud-safe; no hardcoded local path) ----
-rule_engine = RuleEngine()
+# ---- One RuleEngine instance (cloud-safe; uses repo rules file) ----
+rule_engine = RuleEngine("data/default_rules.json")
 
 with st.sidebar:
     # Top: logo
