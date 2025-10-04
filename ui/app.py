@@ -1,4 +1,3 @@
-# ui/app.py
 import streamlit as st
 import sys
 import os
@@ -305,7 +304,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    .req-column { padding:10px;border-radius:5px;margin-bottom:10px;border:1px solid #ddd; }
+    .req-container { padding:10px;border-radius:5px;margin-bottom:10px;border:1px solid #ddd; }
     .flagged { background:#FFF3CD;color:#856404;border-color:#FFEEBA; }
     .clear { background:#D4EDDA;color:#155724;border-color:#C3E6CB; }
     .highlight-ambiguity { background:#FFFF00;color:black;padding:2px 4px;border-radius:3px; }
@@ -314,7 +313,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- One RuleEngine instance (no hardcoded local path) ----
+# ---- One RuleEngine instance (cloud-safe; no hardcoded local path) ----
 rule_engine = RuleEngine()
 
 with st.sidebar:
@@ -324,19 +323,23 @@ with st.sidebar:
         use_column_width=True  # <-- fixed kwarg
     )
 
-    # Catchphrase
+    # Catchphrase (pick one from below)
     st.markdown("**Clarity in requirements. Confidence in delivery.**")
 
     # --- CSS: make sidebar a full-height flex column
     st.markdown("""
     <style>
       section[data-testid="stSidebar"] .stSidebarContent {
-        display: flex;
+        display: flex;                /* column layout */
         flex-direction: column;
-        min-height: 100vh;
+        min-height: 100vh;            /* fill viewport height */
       }
-      .sb-spacer { flex: 1 1 auto; }
-      .sb-spacer.min { min-height: 30vh; }
+      .sb-spacer {
+        flex: 1 1 auto;               /* invisible flexible spacer */
+      }
+      /* Optional: guarantee some space even on very short viewports */
+      .sb-spacer.min { min-height: 30vh; }  /* tweak 30vh as you like */
+
       #sb-footer {
         padding-top: .75rem;
         border-top: 1px solid rgba(0,0,0,.08);
@@ -345,6 +348,8 @@ with st.sidebar:
       #sb-footer a:hover { text-decoration: underline; }
     </style>
     """, unsafe_allow_html=True)
+
+    # (Place any future sidebar controls ABOVE the spacer)
 
     # Invisible spacer that expands to push footer down
     st.markdown("<div class='sb-spacer min'></div>", unsafe_allow_html=True)
@@ -528,7 +533,9 @@ with right_col:
             import ui.widgets.quick_chat as _quick_chat  # import the module
             _quick_chat = importlib.reload(_quick_chat)  # hot reload to avoid stale function
             if hasattr(_quick_chat, "render_inline_quick_chat"):
-                _quick_chat.render_inline_quick_chat(st, {"get_chatbot_response": get_chatbot_response})
+                _quick_chat.render_inline_quick_chat(st, {
+                    "get_chatbot_response": get_chatbot_response
+                })
             else:
                 st.error("render_inline_quick_chat() not found in ui/widgets/quick_chat.py")
         except Exception as e:
@@ -569,7 +576,6 @@ with main_col:
         "💬 Requirements Chatbot",
     ])
 
-# Shared context passed to tabs
 CTX = {
     "HAS_AI_PARSER": HAS_AI_PARSER,
     "get_ai_suggestion": get_ai_suggestion,
