@@ -409,7 +409,7 @@ Parent requirement:
                     elif has_sing:
                         cols = st.columns(3)
                         with cols[0]:
-                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"):
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"]:
                                 try:
                                     suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
@@ -418,7 +418,7 @@ Parent requirement:
                                 except Exception as e:
                                     st.warning(f"AI rewrite failed: {e}")
                         with cols[1]:
-                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"):
+                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"]:
                                 try:
                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
                                     d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
@@ -432,11 +432,11 @@ Parent requirement:
                                 except Exception as e:
                                     st.warning(f"AI decomposition failed: {e}")
                         with cols[2]:
-                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"):
+                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"]:
                                 try:
                                     cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
-                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], cleaned)
+                                    d = _ai_decompose_children(st.session_state.api_key, r['id'], cleaned)
                                     if d.strip():
                                         key = f"decomp_cache_{r['id']}"
                                         existing = st.session_state.get(key, "").strip()
@@ -452,7 +452,7 @@ Parent requirement:
                     else:
                         cols = st.columns(1)
                         with cols[0]:
-                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_only_{r['id']}"):
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_only_{r['id']}"]:
                                 try:
                                     suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
@@ -799,11 +799,15 @@ Parent requirement:
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
 
-                    # ---- Word cloud of ambiguous terms (NO nested expander) ----
+                    # ---- Word cloud of ambiguous terms (clean labeled tokens) ----
                     all_ambiguous_words = []
                     for r in results:
                         if r["ambiguous"]:
-                            all_ambiguous_words.extend(r["ambiguous"])
+                            for token in r["ambiguous"]:
+                                # if token like "Non-binding modal: will", keep only the tail "will"
+                                word = token.split(":", 1)[1].strip() if ":" in token else token
+                                if word:
+                                    all_ambiguous_words.append(word)
 
                     show_wc = st.checkbox(
                         "Show Common Weak Words (Word Cloud)",
@@ -857,7 +861,7 @@ Parent requirement:
                                     if only_sing:
                                         cols = st.columns(1)
                                         with cols[0]:
-                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_only_{r['id']}"):
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_only_{r['id']}"]:
                                                 with st.spinner("Decomposing into single-action children..."):
                                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     decomp = _ai_decompose_clean_doc(st.session_state.api_key, r["id"], base)
@@ -871,7 +875,7 @@ Parent requirement:
                                     elif has_sing:
                                         cols = st.columns(3)
                                         with cols[0]:
-                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"):
+                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_{r['id']}"]:
                                                 with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
                                                     cleaned = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
@@ -879,7 +883,7 @@ Parent requirement:
                                                     st.success("Rewritten draft:")
                                                     st.markdown(f"> {cleaned}")
                                         with cols[1]:
-                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_{r['id']}"):
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"decomp_{r['id']}"]:
                                                 with st.spinner("Decomposing into single-action children..."):
                                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     decomp = _ai_decompose_clean_doc(st.session_state.api_key, r["id"], base)
@@ -891,7 +895,7 @@ Parent requirement:
                                                 st.info("Decomposition:")
                                                 st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", decomp))
                                         with cols[2]:
-                                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}"):
+                                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipeline_{r['id']}"]:
                                                 with st.spinner("Rewriting, then decomposing..."):
                                                     cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
@@ -910,7 +914,7 @@ Parent requirement:
                                     else:
                                         cols = st.columns(1)
                                         with cols[0]:
-                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_only_{r['id']}"):
+                                            if st.button(f"⚒️ Fix Clarity (Rewrite) [{r['id']}]", key=f"fix_only_{r['id']}"]:
                                                 with st.spinner("Rewriting to remove ambiguity/passive/incompleteness..."):
                                                     cleaned = _ai_rewrite_clarity_doc(st.session_state.api_key, r["text"])
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
