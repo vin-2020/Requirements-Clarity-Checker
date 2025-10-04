@@ -529,7 +529,7 @@ Parent requirement:
                         cols = st.columns(3)
 
                         with cols[0]:
-                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"):
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"]:
                                 try:
                                     suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
@@ -538,7 +538,7 @@ Parent requirement:
                                 except Exception as e:
                                     st.warning(f"AI rewrite failed: {e}")
                         with cols[1]:
-                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"):
+                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"]:
                                 try:
                                     base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
                                     d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
@@ -552,7 +552,7 @@ Parent requirement:
                                 except Exception as e:
                                     st.warning(f"AI decomposition failed: {e}")
                         with cols[2]:
-                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"):
+                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"]:
                                 try:
                                     cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
