@@ -196,8 +196,12 @@ def extract_requirements_from_file(uploaded_file):
 
 def format_requirement_with_highlights(req_id, req_text, issues):
     highlighted_text = req_text
+    # tolerate labeled tokens like "Non-binding modal: will" -> highlight just "will"
     if issues.get('ambiguous'):
-        for word in issues['ambiguous']:
+        for token in issues['ambiguous']:
+            word = token.split(":", 1)[1].strip() if ":" in token else token
+            if not word:
+                word = token
             highlighted_text = re.sub(
                 r'\b' + re.escape(word) + r'\b',
                 f'<span style="background-color:#FFFF00;color:black;padding:2px 4px;border-radius:3px;">{word}</span>',
@@ -228,10 +232,23 @@ def format_requirement_with_highlights(req_id, req_text, issues):
     )
 
 def safe_call_ambiguity(text: str, engine: RuleEngine | None):
+    """
+    Prefer the JSON-driven RuleEngine.check_ambiguity() when available.
+    Fallback to legacy check_requirement_ambiguity for compatibility.
+    """
+    # 1) Try the new engine path
+    try:
+        if engine and hasattr(engine, "check_ambiguity"):
+            return engine.check_ambiguity(text or "") or []
+    except Exception:
+        pass
+    # 2) Legacy analyzer path (supports older deployments)
     try:
         return check_requirement_ambiguity(text, engine)
     except TypeError:
         return check_requirement_ambiguity(text)
+    except Exception:
+        return []
 
 def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, engine: RuleEngine | None = None):
     try:
@@ -369,8 +386,8 @@ if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
 st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
 
-# One RuleEngine instance (real or stub)
-rule_engine = RuleEngine()
+# One RuleEngine instance (real or stub)  <-- path specified so prod can find JSON
+rule_engine = RuleEngine("data/default_rules.json")
 
 # ======================= Layout: main + right panel =======================
 main_col, right_col = st.columns([4, 1], gap="large")
@@ -609,6 +626,3 @@ with tab_chat:
         chat_tab.render(st, db, rule_engine, CTX)
     else:
         st.error("Chat tab not available.")
-
-
-
