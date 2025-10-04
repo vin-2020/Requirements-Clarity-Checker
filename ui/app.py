@@ -1,4 +1,3 @@
-# ui/app.py
 import streamlit as st
 import sys
 import os
@@ -16,30 +15,6 @@ ENABLE_FLOATING_CHAT = False  # keep inline, not floating
 
 # Make local packages importable when run from /ui
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# ------------------------- spaCy: safe, top-level loader -------------------------
-# Ensures the model is available in Streamlit Cloud even if the env changes.
-# Requirements: include the wheel line in requirements.txt:
-# en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
-NLP_STATUS = "loading"
-try:
-    import en_core_web_sm as _en_core_web_sm
-    nlp = _en_core_web_sm.load()
-    NLP_STATUS = "en_core_web_sm (package) loaded"
-except Exception:
-    try:
-        import spacy
-        try:
-            nlp = spacy.load("en_core_web_sm")
-            NLP_STATUS = "en_core_web_sm (spacy.load) loaded"
-        except OSError:
-            from spacy.cli import download
-            download("en_core_web_sm")
-            nlp = spacy.load("en_core_web_sm")
-            NLP_STATUS = "en_core_web_sm downloaded & loaded"
-    except Exception as _e:
-        nlp = None
-        NLP_STATUS = f"spaCy unavailable: {_e}"
 
 # ------------------------- Imports from your app -------------------------
 from core.analyzer import (
@@ -79,6 +54,7 @@ get_chatbot_response = getattr(
         ) + "\nASSISTANT:"
     ),
 )
+
 
 decompose_requirement_with_ai = getattr(
     ai, "decompose_requirement_with_ai",
@@ -196,17 +172,21 @@ def extract_requirements_from_file(uploaded_file):
 
 def format_requirement_with_highlights(req_id, req_text, issues):
     highlighted_text = req_text
-    # tolerate labeled tokens like "Non-binding modal: will" -> highlight just "will"
+
+    # --- ambiguity highlighting (supports labeled tokens like "Non-binding modal: will") ---
     if issues.get('ambiguous'):
         for token in issues['ambiguous']:
+            # If token has a label, highlight the tail word/phrase
             word = token.split(":", 1)[1].strip() if ":" in token else token
             if not word:
                 word = token
             highlighted_text = re.sub(
                 r'\b' + re.escape(word) + r'\b',
                 f'<span style="background-color:#FFFF00;color:black;padding:2px 4px;border-radius:3px;">{word}</span>',
-                highlighted_text, flags=re.IGNORECASE
+                highlighted_text,
+                flags=re.IGNORECASE
             )
+
     if issues.get('passive'):
         for phrase in issues['passive']:
             highlighted_text = re.sub(
@@ -214,6 +194,7 @@ def format_requirement_with_highlights(req_id, req_text, issues):
                 f'<span style="background-color:#FFA500;padding:2px 4px;border-radius:3px;">{phrase}</span>',
                 highlighted_text, flags=re.IGNORECASE
             )
+
     display_html = f"⚠️ <strong>{req_id}</strong> {highlighted_text}"
     explanations = []
     if issues.get('ambiguous'):
@@ -226,29 +207,44 @@ def format_requirement_with_highlights(req_id, req_text, issues):
         explanations.append(f"<i>- Singularity: Multiple actions indicated: <b>{', '.join(issues['singularity'])}</b></i>")
     if explanations:
         display_html += "<br>" + "<br>".join(explanations)
+
     return (
         f'<div style="background-color:#FFF3CD;color:#856404;padding:10px;'
         f'border-radius:5px;margin-bottom:10px;">{display_html}</div>'
     )
 
+
 def safe_call_ambiguity(text: str, engine: RuleEngine | None):
     """
-    Prefer the JSON-driven RuleEngine.check_ambiguity() when available.
-    Fallback to legacy check_requirement_ambiguity for compatibility.
+    Prefer the JSON-driven RuleEngine.check_ambiguity() so new rules apply.
+    Record which path was used for quick diagnostics.
     """
-    # 1) Try the new engine path
+    # 1) Try engine path
     try:
         if engine and hasattr(engine, "check_ambiguity"):
-            return engine.check_ambiguity(text or "") or []
-    except Exception:
-        pass
-    # 2) Legacy analyzer path (supports older deployments)
+            out = engine.check_ambiguity(text or "") or []
+            st.session_state["dbg_ambiguity_path"] = "engine"
+            st.session_state["dbg_last_amb"] = out
+            return out
+    except Exception as e:
+        st.session_state["dbg_ambiguity_error"] = f"engine: {e}"
+
+    # 2) Legacy fallback
     try:
-        return check_requirement_ambiguity(text, engine)
+        out = check_requirement_ambiguity(text, engine)
+        st.session_state["dbg_ambiguity_path"] = "legacy"
+        st.session_state["dbg_last_amb"] = out
+        return out
     except TypeError:
-        return check_requirement_ambiguity(text)
-    except Exception:
+        out = check_requirement_ambiguity(text)
+        st.session_state["dbg_ambiguity_path"] = "legacy(no-engine-param)"
+        st.session_state["dbg_last_amb"] = out
+        return out
+    except Exception as e:
+        st.session_state["dbg_ambiguity_error"] = f"legacy: {e}"
         return []
+
+
 
 def safe_clarity_score(total_reqs: int, results: list[dict], issue_counts=None, engine: RuleEngine | None = None):
     try:
@@ -321,34 +317,50 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Instantiate RuleEngine **before** using it in diagnostics
+from pathlib import Path
+from core.rule_engine import RuleEngine
+
+# Point exactly to your file
+RULES_PATH = Path(r"C:\Users\vinodh\OneDrive\Desktop\REQCHECKCODE_BACKUP\data\default_rules.json")
+rule_engine = RuleEngine(str(RULES_PATH))
+
+
+
 with st.sidebar:
     # Top: logo
     st.image(
         "https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true",
-        use_column_width=True
+        use_container_width=True
     )
 
     # Catchphrase (pick one from below)
     st.markdown("**Clarity in requirements. Confidence in delivery.**")
 
-    # spaCy status (helpful while debugging deployments)
-    #st.caption(f"🔤 spaCy model status: **{NLP_STATUS}**")
-
     # --- CSS: make sidebar a full-height flex column
     st.markdown("""
     <style>
       section[data-testid="stSidebar"] .stSidebarContent {
-        display: flex;
+        display: flex;                /* column layout */
         flex-direction: column;
-        min-height: 100vh;
+        min-height: 100vh;            /* fill viewport height */
       }
-      .sb-spacer { flex: 1 1 auto; }
-      .sb-spacer.min { min-height: 30vh; }
-      #sb-footer { padding-top: .75rem; border-top: 1px solid rgba(0,0,0,.08); }
+      .sb-spacer {
+        flex: 1 1 auto;               /* invisible flexible spacer */
+      }
+      /* Optional: guarantee some space even on very short viewports */
+      .sb-spacer.min { min-height: 30vh; }  /* tweak 30vh as you like */
+
+      #sb-footer {
+        padding-top: .75rem;
+        border-top: 1px solid rgba(0,0,0,.08);
+      }
       #sb-footer a { text-decoration: none; }
       #sb-footer a:hover { text-decoration: underline; }
     </style>
     """, unsafe_allow_html=True)
+
+    # (Place any future sidebar controls ABOVE the spacer)
 
     # Invisible spacer that expands to push footer down
     st.markdown("<div class='sb-spacer min'></div>", unsafe_allow_html=True)
@@ -363,6 +375,7 @@ with st.sidebar:
       <div>📧 <b>reqcheck.dev@gmail.com</b></div>
     </div>
     """, unsafe_allow_html=True)
+
 
 st.title("✨ ReqCheck: AI-Powered Requirements Assistant")
 
@@ -386,8 +399,9 @@ if 'selected_project' not in st.session_state:
     st.session_state.selected_project = None
 st.markdown("Get your free API key from [Google AI Studio](https://aistudio.google.com/).")
 
-# One RuleEngine instance (real or stub)  <-- path specified so prod can find JSON
-rule_engine = RuleEngine("data/default_rules.json")
+# One RuleEngine instance (real or stub)
+rule_engine = RuleEngine()
+
 
 # ======================= Layout: main + right panel =======================
 main_col, right_col = st.columns([4, 1], gap="large")
@@ -578,7 +592,6 @@ with main_col:
         "💬 Requirements Chatbot",
     ])
 
-# Context object passed to tabs (includes spaCy nlp)
 CTX = {
     "HAS_AI_PARSER": HAS_AI_PARSER,
     "get_ai_suggestion": get_ai_suggestion,
@@ -600,7 +613,6 @@ CTX = {
     "safe_clarity_score": safe_clarity_score,
     "_save_uploaded_file_for_doc": _save_uploaded_file_for_doc,
     "_sanitize_filename": _sanitize_filename,
-    "nlp": nlp,  # <--- make spaCy available to tabs
 }
 
 with tab_home:
