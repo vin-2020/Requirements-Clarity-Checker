@@ -203,7 +203,7 @@ def _extract_requirements_from_table_rows(table_rows):
 def extract_requirements_from_string(content: str):
     requirements = []
     req_pattern = re.compile(r'^(([A-Z][A-Z0-9-]*-\d+)|(\d+\.))\s+(.*)$')
-    for line in content split('\n'):
+    for line in content.split('\n'):
         line = line.strip()
         m = req_pattern.match(line)
         if m:
@@ -844,3 +844,4 @@ st.markdown("""
   <a href="mailto:reqcheck.dev@gmail.com">Contact</a>
 </div>
 """, unsafe_allow_html=True)
+
