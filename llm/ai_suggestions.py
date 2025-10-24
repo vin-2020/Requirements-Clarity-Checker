@@ -1,4 +1,3 @@
-
 # llm/ai_suggestions.py
 """
 Lightweight helpers for ReqCheck's AI features (Gemini via google.generativeai).
