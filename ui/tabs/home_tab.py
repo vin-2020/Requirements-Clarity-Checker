@@ -2,6 +2,7 @@
 from __future__ import annotations
 from streamlit.components.v1 import html
 
+
 def render(st, db, rule_engine, CTX):
     # ---------- Styles (clean white/black + higher contrast) ----------
     st.markdown("""
@@ -14,7 +15,7 @@ def render(st, db, rule_engine, CTX):
       .rc-h2 { font-size: 24px; font-weight: 800; margin: 4px 0 10px; color:#0b1220; }
 
       /* Soft info blocks */
-      .story, .contact{
+      .story, .contact {
         background:#ffffff; border:1px solid #e5e7eb; border-radius:12px;
         padding:14px 16px; box-shadow:0 2px 6px rgba(15,23,42,.04);
       }
@@ -65,7 +66,7 @@ def render(st, db, rule_engine, CTX):
         unsafe_allow_html=True
     )
 
-    # ---------- Tools overview (each with a button that jumps to its tab) ----------
+    # ---------- Tools overview ----------
     st.markdown('<div class="rc-h2">Explore the tools</div>', unsafe_allow_html=True)
     st.markdown('<div class="rc-grid">', unsafe_allow_html=True)
 
@@ -112,26 +113,71 @@ def render(st, db, rule_engine, CTX):
         unsafe_allow_html=True
     )
 
-   
-
     st.markdown('</div>', unsafe_allow_html=True)  # /.rc-wrap
 
-    # ---------- Wire the buttons to real tabs (indices: Home=0, Analyzer=1, Need→Req=2, Chatbot=3) ----------
-    html("""
+    # ---------- Robust tab switching ----------
+    html(r"""
     <script>
-      (function(){
-        const P = window.parent || window;
-        const doc = P.document;
-        function tabs(){ return Array.from(doc.querySelectorAll('button[role="tab"]')); }
+    /* Robust tab switcher for Streamlit tabs from a component iframe */
+    (function () {
+      // Use parent (the app frame) when available
+      const P = window.parent || window;
+      const doc = P.document;
 
-        const go = (idx) => {
-          const t = tabs();
-          if (t && t[idx] && typeof t[idx].click === 'function') t[idx].click();
+      // Find ALL tab candidates across Streamlit versions
+      function getAllTabElements() {
+        // v1.30+ often renders tabs as elements with role="tab" (button or div)
+        let byRole = Array.from(doc.querySelectorAll('[role="tab"]'));
+        // If a role="tab" wraps a button, prefer the button; else use the element itself
+        byRole = byRole.map(el => el.tagName === 'BUTTON' ? el : (el.querySelector('button') || el));
+
+        // Fallback: older BaseWeb markup
+        const basewebButtons = Array.from(doc.querySelectorAll('[data-baseweb="tab"] button'));
+
+        // Merge & dedupe
+        const set = new Set([...byRole, ...basewebButtons]);
+        return Array.from(set).filter(Boolean);
+      }
+
+      // Click the Nth tab if it exists
+      function go(idx) {
+        const tabs = getAllTabElements();
+        if (tabs && tabs[idx] && typeof tabs[idx].click === 'function') {
+          tabs[idx].click();
+          return true;
+        }
+        return false;
+      }
+
+      // If tabs aren’t ready yet, retry a few times with delays
+      function clickWhenReady(idx, attempts = 20, delayMs = 100) {
+        let tries = 0;
+        const tryClick = () => {
+          if (go(idx)) return;
+          if (++tries >= attempts) return;
+          setTimeout(tryClick, delayMs);
         };
+        tryClick();
+      }
 
-        document.getElementById('rc-open-analyze')?.addEventListener('click', () => go(1), {passive:true});
-        document.getElementById('rc-open-need')?.addEventListener('click', () => go(2), {passive:true});
-        document.getElementById('rc-open-chat')?.addEventListener('click', () => go(3), {passive:true});
-      })();
+      // Observe DOM changes so late tab renders still work
+      const mo = new MutationObserver(() => { /* no-op: we query fresh each time */ });
+      if (doc && doc.body) {
+        mo.observe(doc.body, { childList: true, subtree: true });
+      }
+
+      // Wire buttons inside THIS iframe document
+      const localDoc = document; // iframe doc
+      const bind = (id, idx) => {
+        const el = localDoc.getElementById(id);
+        if (!el) return;
+        el.addEventListener('click', () => clickWhenReady(idx), { passive: true });
+      };
+
+      // Tab order assumed: Home=0, Analyzer=1, Need→Req=2, Chatbot=3
+      bind('rc-open-analyze', 1);
+      bind('rc-open-need', 2);
+      bind('rc-open-chat', 3);
+    })();
     </script>
     """, height=0)

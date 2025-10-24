@@ -829,4 +829,3 @@ st.markdown("""
   <a href="mailto:reqcheck.dev@gmail.com">Contact</a>
 </div>
 """, unsafe_allow_html=True)
-
