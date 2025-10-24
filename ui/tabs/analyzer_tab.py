@@ -1491,7 +1491,6 @@ Parent requirement:
 
                 # --- Per-document results UI -----------------------------------------
                 with st.expander(f"📄 {display_name} — Clarity {clarity_score}/100 • {total_reqs} requirements"):
-
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Total Requirements", total_reqs)
                     c2.metric("Flagged", flagged_total)
@@ -1527,7 +1526,7 @@ Parent requirement:
                                 st.success(f"Rewrote {rewrote} and decomposed {dec_count} requirement(s).")
                     else:
                         st.caption("ℹ️ Enter your Google AI API key to enable bulk AI rewrites/decomposition.")
-
+ 
                     # --- AI Contradiction Scan (this document) ---
                     # st.subheader("AI Contradiction Scan — This Document")
                     # if st.button("🔎 Run AI Contradiction Scan (this document)", key=f"ai_contra_doc_btn_{doc_idx}"):
@@ -1555,33 +1554,100 @@ Parent requirement:
                     #             else:
                     #                 st.info("No contradictions detected by AI for this document.")
                     # --- AI Contradiction Scan (this document) — instrumented ---
-                doc_req_rows = [{"id": r["id"], "text": r["text"], "doc": display_name}
-                                for r in analyzed_only]
-                subkey = re.sub(r"[^A-Za-z0-9]+", "_", f"{display_name}_{doc_idx}")
-                st.subheader("AI Contradiction Scan — This Document")
-                ai_temp_doc = 0.1
-                dbg = False
-
-            # OUTSIDE the per-document expander, but inside the main loop
-            if not beginner:
-                with st.expander("Advanced (tuning & debug)", expanded=False):
-                    _ai_smoke_check(label_key=f"ai_smoke_doc_{subkey}")
-                    sensitivity_doc = st.select_slider(
-                        "Contradiction sensitivity",
-                        options=["Conservative", "Balanced", "Aggressive"],
-                        value="Balanced",
-                        key=f"contra_sensitivity_{subkey}",
-                        help="Adjust model strictness for contradiction detection.",
-                    )
-                    ai_temp_doc = {"Conservative": 0.0, "Balanced": 0.1, "Aggressive": 0.3}[sensitivity_doc]
-                    dbg = st.toggle("Show debug (prompts & raw model output)", key=f"ai_contra_dbg_{subkey}", value=False)
+                    doc_req_rows = [{"id": r["id"], "text": r["text"], "doc": display_name}
+                                    for r in analyzed_only]
+                    subkey = re.sub(r"[^A-Za-z0-9]+", "_", f"{display_name}_{doc_idx}")
+                    st.subheader("AI Contradiction Scan — This Document")
+                    ai_temp_doc = 0.1
+                    dbg = False
+                    if not beginner:
+                        with st.expander("Advanced (tuning & debug)", expanded=False):
+                            _ai_smoke_check(label_key=f"ai_smoke_doc_{subkey}")
+                            sensitivity_doc = st.select_slider(
+                                "Contradiction sensitivity",
+                                options=["Conservative", "Balanced", "Aggressive"],
+                                value="Balanced",
+                                key=f"contra_sensitivity_{subkey}",
+                                help="Adjust model strictness for contradiction detection.",
+                            )
+                            ai_temp_doc = {"Conservative": 0.0, "Balanced": 0.1, "Aggressive": 0.3}[sensitivity_doc]
+                            dbg = st.toggle("Show debug (prompts & raw model output)", key=f"ai_contra_dbg_{subkey}", value=False)
+                    if st.button("🔎 Run AI Contradiction Scan", key=f"ai_contra_doc_btn_{subkey}"):
+                        if len(doc_req_rows) < 2:
+                            st.info("Need at least two requirements in this document to check contradictions.")
+                        else:
+                            # 1) Deterministic pass
+                            det_doc = _deterministic_contra_scan(doc_req_rows)
+                            # 2) Optional AI pass
+                            ai_doc = []
+                            if _has_api_key():
+                                # Optional prompt preview (debug)
+                                sys_brief = CTX.get("AI_CONTRA_SYSTEM_PROMPT", "").strip()
+                                header = (
+                                    "You are checking a set of natural-language requirements for contradictions ONLY.\n"
+                                    "Return STRICT JSON (no markdown, no commentary): a JSON array of objects with EXACT keys:\n"
+                                    "[{\n"
+                                    '  "kind":"policy_conflict|timing_conflict|accuracy_vs_latency|safety_vs_speed|scope_conflict|resource_conflict|other",\n'
+                                    '  "reason":"concise explanation",\n'
+                                    '  "a_id":"R-###","a_doc":"DocName","a_text":"full text",\n'
+                                    '  "b_id":"R-###","b_doc":"DocName","b_text":"full text",\n'
+                                    '  "scope": "optional scope string or empty"\n'
+                                    "}]\n"
+                                    "Flag only truly incompatible pairs. JSON array only.\n\n"
+                                    "Requirements:\n"
+                                )
+                                listing = "\n".join(f"- [{r['id']}] ({r.get('doc','Doc')}): {r['text']}" for r in doc_req_rows)
+                                fused_prompt = (sys_brief + "\n\n" + header + listing) if sys_brief else (header + listing)
+                                if dbg:
+                                    st.caption(f"Prompt size: {len(fused_prompt)} chars • items: {len(doc_req_rows)}")
+                                    st.text_area("Prompt (read-only)", fused_prompt, height=180, key=f"ai_contra_prompt_{subkey}")
+                                try:
+                                    with st.spinner("Scanning for contradictions with AI..."):
+                                        ai_doc = _force_ai_contra_scan(
+                                            doc_req_rows, CTX,
+                                            timeout_s=max(CTX.get("AI_CONTRA_BUDGET_S", 70), CTX.get("AI_CONTRA_PER_CALL_S", 20)),
+                                            temperature=ai_temp_doc,
+                                        )
+                                except Exception as e:
+                                    st.error(f"AI contradiction scan crashed: {e}")
+                                    ai_doc = []
+                            else:
+                                st.info("AI key not set — showing deterministic contradictions only.")
+                            # 3) Merge & render
+                            def _sigd(f):
+                                return (min(f["a_id"], f["b_id"]), max(f["a_id"], f["b_id"]), f.get("kind",""), (f.get("reason","") or "")[:160])
+                            seen = set(); merged_doc = []
+                            for src in (det_doc or []) + (ai_doc or []):
+                                s = _sigd(src)
+                                if s in seen:
+                                    continue
+                                seen.add(s); merged_doc.append(src)
+                            if merged_doc:
+                                st.caption(f"Found {len(merged_doc)} contradiction(s):")
+                                for f in merged_doc[:300]:
+                                    st.markdown(
+                                        f"🚨 **{f['kind'].capitalize()}** — {f['reason']}"
+                                        f"\n\n• **{f['a_id']}** ({f['a_doc']}): {f['a_text']}"
+                                        f"\n\n• **{f['b_id']}** ({f['b_doc']}): {f['b_text']}"
+                                        + (f"\n\n_Scope_: `{f['scope']}`" if f.get('scope') else "")
+                                    )
+                            else:
+                                st.info("No contradictions detected by the deterministic + AI scan.")
+                                if dbg:
+                                    st.caption("Tip: Enable debug above to inspect prompts and raw model output.")
 
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
 
-                    # Debug: show all accepted requirement lines
+                        # Debug: show all accepted requirement lines
+                        # NOTE: This expander must not be nested inside another expander or Streamlit block.
+                        # Prepare debug lines for later rendering outside the expander
+                        debug_lines = [(r["id"], r["text"]) for r in analyzed_only]
+                    # End of the parent expander
+    
+                    # After the parent expander ends, add the debug expander at the same indentation level
                     with st.expander("Debug: show all accepted requirement lines"):
-                        for rid, rtext in [(r["id"], r["text"]) for r in analyzed_only]:
+                        for rid, rtext in debug_lines:
                             st.markdown(f"- **{rid}**: {rtext}")
 
                     st.subheader("Detailed Analysis")
@@ -1793,6 +1859,7 @@ Parent requirement:
             st.error(f"Failed to load documents: {e}")
     else:
         st.info("Select a project to view its documents.")
+
 
 
 
