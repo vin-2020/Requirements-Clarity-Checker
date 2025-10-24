@@ -692,46 +692,46 @@ with main_col:
     <style> div[role="tablist"] { display: none !important; } </style>
     """, unsafe_allow_html=True)
 
-        # Wire navbar clicks to hidden tabs + keep active highlight in sync
-        from streamlit.components.v1 import html as _html
-        _html("""
-        <script>
-        (function(){
-            const P = window.parent || window;
-            const doc = P.document;
-            function getTabs(){ return Array.from(doc.querySelectorAll('button[role="tab"]')); }
-            function setActive(idx){
-                const links = doc.querySelectorAll('.rc-menu .rc-link');
-                links.forEach(el => el.classList.remove('active'));
-                if (links[idx]) links[idx].classList.add('active');
-            }
-            // Click on navbar -> click hidden tab
-            doc.querySelectorAll('.rc-menu .rc-link').forEach(link=>{
-                link.addEventListener('click', (event)=>{
-                    if (event) {
-                        event.preventDefault();
-                        event.stopPropagation();
-                    }
-                    const idx = Number(link.getAttribute('data-tab')) || 0;
-                    const tabs = getTabs();
-                    if (tabs[idx] && typeof tabs[idx].click === 'function') tabs[idx].click();
-                    setActive(idx);
-                }, false);
-            });
-            // Init active state
-            setActive(0);
-            // Observe tab selection changes (keyboard, code, etc.)
-            const tablist = doc.querySelector('div[role="tablist"]');
-            if (tablist && 'MutationObserver' in P){
-                new MutationObserver(()=>{
-                    const tabs = getTabs();
-                    const activeIdx = tabs.findIndex(b => b.getAttribute('aria-selected') === 'true');
-                    if (activeIdx >= 0) setActive(activeIdx);
-                }).observe(tablist, { attributes:true, subtree:true, attributeFilter:['aria-selected','class'] });
-            }
-        })();
-        </script>
-        """, height=0)
+    # Wire navbar clicks to hidden tabs + keep active highlight in sync
+    from streamlit.components.v1 import html as _html
+    _html("""
+    <script>
+    (function(){
+        const P = window.parent || window;
+        const doc = P.document;
+        function getTabs(){ return Array.from(doc.querySelectorAll('button[role="tab"]')); }
+        function setActive(idx){
+            const links = doc.querySelectorAll('.rc-menu .rc-link');
+            links.forEach(el => el.classList.remove('active'));
+            if (links[idx]) links[idx].classList.add('active');
+        }
+        // Click on navbar -> click hidden tab
+        doc.querySelectorAll('.rc-menu .rc-link').forEach(link=>{
+            link.addEventListener('click', (event)=>{
+                if (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                }
+                const idx = Number(link.getAttribute('data-tab')) || 0;
+                const tabs = getTabs();
+                if (tabs[idx] && typeof tabs[idx].click === 'function') tabs[idx].click();
+                setActive(idx);
+            }, false);
+        });
+        // Init active state
+        setActive(0);
+        // Observe tab selection changes (keyboard, code, etc.)
+        const tablist = doc.querySelector('div[role="tablist"]');
+        if (tablist && 'MutationObserver' in P){
+            new MutationObserver(()=>{
+                const tabs = getTabs();
+                const activeIdx = tabs.findIndex(b => b.getAttribute('aria-selected') === 'true');
+                if (activeIdx >= 0) setActive(activeIdx);
+            }).observe(tablist, { attributes:true, subtree:true, attributeFilter:['aria-selected','class'] });
+        }
+    })();
+    </script>
+    """, height=0)
 
 # ------------------------------ Main Tabs (LEAN loader) ------------------------------
 home_tab = analyzer_tab = needs_tab = chat_tab = None
