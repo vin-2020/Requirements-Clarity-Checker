@@ -614,42 +614,56 @@ st.markdown("""
 <style>
 /* === NAVBAR (fixed top) === */
 .rc-navbar {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 22px 32px;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 99999; /* keep it above everything */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 24px 34px;
   background: var(--rc-bg);
   border-bottom: 1px solid var(--rc-border);
   backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
+
+/* Override Streamlit’s default header offset */
+[data-testid="stHeader"] { z-index: 0 !important; }
+ 
 /* Push app content below fixed navbar */
-body, [data-testid="stAppViewContainer"] > div:first-child { padding-top: 60px !important; }
-
-/* Brand (left) */
-.rc-brand { display:flex; align-items:center; gap:14px; }
-.rc-logo { height: 40px; width:auto; border-radius:12px; }
-.rc-name {
-  font-family: "Poppins", Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-weight: 800; font-size: 22px;
-  background: linear-gradient(90deg, var(--rc-primary), #22D3EE);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  letter-spacing: .3px;
+body, [data-testid="stAppViewContainer"] > div:first-child {
+  padding-top: 90px !important; /* was 60px */
 }
-/* Menu (right) */
-.rc-menu { display:flex; align-items:center; gap: 18px; flex-wrap: wrap; }
-.rc-link {
-  display:inline-flex; align-items:center; gap:8px;
-  font-weight: 600; font-size: 15px; color: var(--rc-text);
-  text-decoration: none; cursor: pointer; position: relative; padding: 6px 2px;
-}
-.rc-link:hover { color: var(--rc-primary); }
-/* Active underline */
-.rc-link.active::after {
-  content:""; position:absolute; left:0; right:0; bottom:-8px;
-  height: 3px; background: var(--rc-primary); border-radius: 4px;
-}
-@media (max-width: 800px) { .rc-menu { gap: 12px; } }
+ 
+ /* Brand (left) */
+ .rc-brand { display:flex; align-items:center; gap:14px; }
+ .rc-logo { height: 40px; width:auto; border-radius:12px; }
+ .rc-name {
+   font-family: "Poppins", Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+   font-weight: 800; font-size: 22px;
+   background: linear-gradient(90deg, var(--rc-primary), #22D3EE);
+   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+   letter-spacing: .3px;
+ }
+ /* Menu (right) */
+ .rc-menu { display:flex; align-items:center; gap: 18px; flex-wrap: wrap; }
+ .rc-link {
+   display:inline-flex; align-items:center; gap:8px;
+   font-weight: 600; font-size: 15px; color: var(--rc-text);
+   text-decoration: none; cursor: pointer; position: relative; padding: 6px 2px;
+ }
+ .rc-link:hover { color: var(--rc-primary); }
+ /* Active underline */
+ .rc-link.active::after {
+   content:""; position:absolute; left:0; right:0; bottom:-8px;
+   height: 3px; background: var(--rc-primary); border-radius: 4px;
+ }
+ @media (max-width: 800px) { .rc-menu { gap: 12px; } }
 </style>
-
+ 
 <div class="rc-navbar">
   <div class="rc-brand">
     <img class="rc-logo" src="https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true" alt="ReqCheck"/>
