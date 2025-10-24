@@ -609,71 +609,71 @@ with right_col:
         except Exception as e:
             st.error(f"Quick Chat failed to load: {e}")
 
-# --- Website-like global navbar (fixed top; robust, no new tabs) ---
+# --- Website-like global navbar (logo left, tabs right) ---
 st.markdown("""
 <style>
 /* === NAVBAR (fixed top) === */
 .rc-navbar {
   position: fixed;
-  top: 0; left: 0; right: 0;
-  z-index: 99999;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 14px; padding: 24px 34px;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 99999; /* keep it above everything */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 24px 34px;
   background: var(--rc-bg);
   border-bottom: 1px solid var(--rc-border);
   backdrop-filter: blur(8px);
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
 
-/* Make sure Streamlit header doesn’t overlap */
+/* Override Streamlit’s default header offset */
 [data-testid="stHeader"] { z-index: 0 !important; }
-
+ 
 /* Push app content below fixed navbar */
 body, [data-testid="stAppViewContainer"] > div:first-child {
-  padding-top: 90px !important;
+  padding-top: 90px !important; /* was 60px */
 }
-
-/* Brand (left) */
-.rc-brand { display:flex; align-items:center; gap:14px; }
-.rc-logo { height: 40px; width:auto; border-radius:12px; }
-.rc-name {
-  font-family: "Poppins", Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  font-weight: 800; font-size: 22px;
-  background: linear-gradient(90deg, var(--rc-primary), #22D3EE);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  letter-spacing: .3px;
-}
-
-/* Menu (right) */
-.rc-menu { display:flex; align-items:center; gap: 18px; flex-wrap: wrap; }
-.rc-link {
-  appearance: none; background: none; border: 0;
-  display:inline-flex; align-items:center; gap:8px;
-  font-weight: 600; font-size: 15px; color: var(--rc-text);
-  text-decoration: none; cursor: pointer; position: relative; padding: 6px 2px;
-}
-.rc-link:hover { color: var(--rc-primary); }
-
-/* Active underline */
-.rc-link.active::after {
-  content:""; position:relative; display:block; top:8px;
-  height: 3px; background: var(--rc-primary); border-radius: 4px;
-}
-
-@media (max-width: 800px) { .rc-menu { gap: 12px; } }
+ 
+ /* Brand (left) */
+ .rc-brand { display:flex; align-items:center; gap:14px; }
+ .rc-logo { height: 40px; width:auto; border-radius:12px; }
+ .rc-name {
+   font-family: "Poppins", Inter, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+   font-weight: 800; font-size: 22px;
+   background: linear-gradient(90deg, var(--rc-primary), #22D3EE);
+   -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+   letter-spacing: .3px;
+ }
+ /* Menu (right) */
+ .rc-menu { display:flex; align-items:center; gap: 18px; flex-wrap: wrap; }
+ .rc-link {
+   display:inline-flex; align-items:center; gap:8px;
+   font-weight: 600; font-size: 15px; color: var(--rc-text);
+   text-decoration: none; cursor: pointer; position: relative; padding: 6px 2px;
+ }
+ .rc-link:hover { color: var(--rc-primary); }
+ /* Active underline */
+ .rc-link.active::after {
+   content:""; position:absolute; left:0; right:0; bottom:-8px;
+   height: 3px; background: var(--rc-primary); border-radius: 4px;
+ }
+ @media (max-width: 800px) { .rc-menu { gap: 12px; } }
 </style>
-
+ 
 <div class="rc-navbar">
   <div class="rc-brand">
     <img class="rc-logo" src="https://github.com/vin-2020/Requirements-Clarity-Checker/blob/main/ReqCheck_Logo.png?raw=true" alt="ReqCheck"/>
     <div class="rc-name">ReqCheck</div>
   </div>
   <nav class="rc-menu" id="rc-menu">
-    <!-- use buttons to avoid any anchor navigation -->
-    <button type="button" class="rc-link" data-tab="0">🏠 Home</button>
-    <button type="button" class="rc-link" data-tab="1">📄 Analyzer</button>
-    <button type="button" class="rc-link" data-tab="2">💡 Need→Req</button>
-    <button type="button" class="rc-link" data-tab="3">💬 Chatbot</button>
+    <a class="rc-link" data-tab="0">🏠 Home</a>
+    <a class="rc-link" data-tab="1">📄 Analyzer</a>
+    <a class="rc-link" data-tab="2">💡 Need→Req</a>
+    <a class="rc-link" data-tab="3">💬 Chatbot</a>
   </nav>
 </div>
 """, unsafe_allow_html=True)
@@ -691,48 +691,33 @@ with main_col:
     <style> div[role="tablist"] { display: none !important; } </style>
     """, unsafe_allow_html=True)
 
-    # Wire navbar clicks to hidden tabs + keep active highlight in sync (robust, no new tabs)
+    # Wire navbar clicks to hidden tabs + keep active highlight in sync
     from streamlit.components.v1 import html as _html
     _html("""
     <script>
     (function(){
-      // stay in same document (some hosts block parent access)
-      const doc = document;
-
-      function getTabs(){
-        return Array.from(doc.querySelectorAll('button[role="tab"]'));
-      }
-
+      const P = window.parent || window;
+      const doc = P.document;
+      function getTabs(){ return Array.from(doc.querySelectorAll('button[role="tab"]')); }
       function setActive(idx){
         const links = doc.querySelectorAll('.rc-menu .rc-link');
         links.forEach(el => el.classList.remove('active'));
         if (links[idx]) links[idx].classList.add('active');
       }
-
-      // If any anchors existed from cache, neutralize them
-      doc.querySelectorAll('.rc-menu a.rc-link').forEach(a=>{
-        a.removeAttribute('href');
-        a.setAttribute('role','button');
-        a.setAttribute('tabindex','0');
-      });
-
-      // Click handler that blocks default navigation
+      // Click on navbar -> click hidden tab
       doc.querySelectorAll('.rc-menu .rc-link').forEach(link=>{
-        link.addEventListener('click', (e)=>{
-          e.preventDefault(); e.stopPropagation();
+        link.addEventListener('click', ()=>{
           const idx = Number(link.getAttribute('data-tab')) || 0;
           const tabs = getTabs();
           if (tabs[idx] && typeof tabs[idx].click === 'function') tabs[idx].click();
           setActive(idx);
-        }, {passive:false});
+        }, {passive:true});
       });
-
       // Init active state
       setActive(0);
-
-      // Observe tab selection changes (keyboard, programmatic, etc.)
+      // Observe tab selection changes (keyboard, code, etc.)
       const tablist = doc.querySelector('div[role="tablist"]');
-      if (tablist && 'MutationObserver' in window){
+      if (tablist && 'MutationObserver' in P){
         new MutationObserver(()=>{
           const tabs = getTabs();
           const activeIdx = tabs.findIndex(b => b.getAttribute('aria-selected') === 'true');
@@ -844,4 +829,3 @@ st.markdown("""
   <a href="mailto:reqcheck.dev@gmail.com">Contact</a>
 </div>
 """, unsafe_allow_html=True)
-
