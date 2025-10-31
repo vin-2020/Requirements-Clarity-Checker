@@ -955,6 +955,30 @@ Parent requirement:
     if st.session_state.quick_analyzed and st.session_state.quick_results:
         quick_results = st.session_state.quick_results
         issue_counts = st.session_state.quick_issue_counts
+        # --- Download analyzed results (Quick Paste) ---
+        import io
+        if quick_results:
+                df_quick = pd.DataFrame([
+                    {
+                        "ID": r["id"],
+                        "Requirement": r["text"],
+                        "Ambiguity": ", ".join(r.get("ambiguous", [])) if r.get("ambiguous") else "",
+                        "Passive Voice": ", ".join(r.get("passive", [])) if r.get("passive") else "",
+                        "Incomplete": "Yes" if r.get("incomplete") else "",
+                        "Not Singular": ", ".join(r.get("singularity", [])) if r.get("singularity") else "",
+                        "AI Rewrite": st.session_state.get(f"rewritten_cache_{r['id']}", ""),
+                        "AI Decomposition": st.session_state.get(f"decomp_cache_{r['id']}", "")
+                    }
+                    for r in quick_results
+                ])
+                csv_quick = df_quick.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="📥 Download Quick Analyzer Results (CSV)",
+                    data=csv_quick,
+                    file_name="quick_analyzer_results.csv",
+                    mime="text/csv",
+                    key="dl_quick_results"
+                )
 
         total = len(quick_results)
         flagged = sum(1 for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])
@@ -1638,6 +1662,30 @@ Parent requirement:
 
                     st.subheader("Issues by Type")
                     st.bar_chart(issue_counts)
+                        # --- Download analyzed results (This Document) ---
+                    import io
+                    if analyzed_only:
+                        df_doc = pd.DataFrame([
+                            {
+                                "ID": r["id"],
+                                "Requirement": r["text"],
+                                "Ambiguity": ", ".join(r.get("ambiguous", [])) if r.get("ambiguous") else "",
+                                "Passive Voice": ", ".join(r.get("passive", [])) if r.get("passive") else "",
+                                "Incomplete": "Yes" if r.get("incomplete") else "",
+                                "Not Singular": ", ".join(r.get("singularity", [])) if r.get("singularity") else "",
+                                "AI Rewrite": st.session_state.get(f"rewritten_cache_{r['id']}", ""),
+                                "AI Decomposition": st.session_state.get(f"decomp_cache_{r['id']}", "")
+                            }
+                            for r in analyzed_only
+                        ])
+                        csv_doc = df_doc.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            label=f"📥 Download Results for {display_name} (CSV)",
+                            data=csv_doc,
+                            file_name=f"{display_name.replace(' ', '_')}_analysis.csv",
+                            mime="text/csv",
+                            key=f"dl_doc_{doc_idx}"
+                        )
 
                     # Debug: show all accepted requirement lines
                     with st.expander("Debug: show all accepted requirement lines"):
