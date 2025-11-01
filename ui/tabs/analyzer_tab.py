@@ -22,6 +22,101 @@ def render(st, db, rule_engine, CTX):
     decompose_requirement_with_ai = CTX["decompose_requirement_with_ai"]
     extract_requirements_with_ai = CTX.get("extract_requirements_with_ai")
 
+    # ---------- STRICT requirement gate (shared) ----------
+    _REQ_MODAL_RE = re.compile(r"\b(shall|must|will|should)\b", re.I)
+
+    # Known section/heading terms
+    _COMMON_HEADING_TERMS = {
+        "introduction", "overview", "system overview", "scope", "requirements",
+        "appendix", "glossary", "references", "purpose", "background", "summary",
+        "assumptions", "constraints", "abbreviations", "definitions", "table of contents"
+    }
+
+    # Strip leading requirement ID like "R-041:" or "REQ_12 :"
+    _LEADING_ID_RE = re.compile(r"^\s*[A-Z]{1,8}-?\d{1,5}\s*:?\s*", re.I)
+
+    # Catch code-like lines and obvious non-requirements (balanced & 3.13-safe)
+    _CODE_LINE_RE = re.compile(
+        r'(?:^\s*(?:#|//))'                      # comment at start of line
+        r'|(?:^\s*(?:from\s+\w+|import\s+\w+))'  # imports
+        r'|(?:^\s*(?:class|def)\s+\w+\s*\()'     # class/def signatures
+        r'|(?:^\s*@\w+)'                         # decorators
+        r'|re\.compile\('                        # explicit re.compile(
+    )
+
+    # --- Subject start: broader natural-language subjects (detectors/nouns) ---
+    _SUBJECT_START_RE = re.compile(
+        r"^(the|this|a|an|all|any|each|every|"
+        r"system|software|application|device|module|service|"
+        r"user|operator|controller|interface|api|component|"
+        r"satellite|spacecraft|payload|tt&c|ttc|link|uplink|downlink|"
+        r"eps|battery|detector|components?|deployables?|c&dh|cdh|fsw|"
+        r"telemetry|command(?:\s+links?)?|project|ground(?:\s+segment)?|mission|data(?:\s+products?)?"
+        r")\b",
+        re.I
+    )
+
+    def _base_text_without_id(txt: str) -> str:
+        s = (txt or "").strip()
+        return _LEADING_ID_RE.sub("", s)  # remove any leading ID/colon
+
+    def _looks_like_heading(txt: str) -> bool:
+        s = _base_text_without_id(txt or "")
+        s = s.strip()
+        if not s:
+            return True
+
+        # NEW: known section/heading terms
+        if s.lower() in _COMMON_HEADING_TERMS:
+            return True
+
+        # If it already has a binding modal, it's not a heading.
+        if _REQ_MODAL_RE.search(s):
+            return False
+
+        s_upper = s.upper()
+
+        # Very short lines without binding modals/verbs -> likely headings
+        if len(s.split()) <= 4:
+            return True
+
+        # Numbered headings like "1. Introduction", "2.3.4 Requirements"
+        if s_upper and s_upper[0].isdigit():
+            return True
+
+        if len(s) <= 80 and s == s_upper and " SHALL " not in f" {s_upper} ":
+            return True
+
+        if len(s.split()) <= 8 and s.endswith((':', ';')):
+            return True
+
+        return False
+
+    def _classify_requirement_line(text: str):
+        """
+        Return one of: ("requirement", ""),
+                       ("statement_missing_modal", reason),
+                       ("non_requirement", reason),
+                       ("gibberish", reason)
+        """
+        t = (text or "").strip()
+        if not t:
+            return "gibberish", "Empty line."
+
+        # Obvious code or headings
+        if _CODE_LINE_RE.search(t) or _looks_like_heading(t):
+            return "non_requirement", "Looks like a heading/code/non-requirement."
+
+        # Must contain a binding modal
+        if not _REQ_MODAL_RE.search(t):
+            core = _base_text_without_id(t)
+            # Sentence-like with a natural subject → likely a requirement missing 'shall'
+            if _SUBJECT_START_RE.search(core) or len(core.split()) >= 6:
+                return "statement_missing_modal", "Missing binding modal (use 'shall')."
+            return "non_requirement", "No binding modal and not sentence-like."
+
+        # Has modal → treat as a requirement
+        return "requirement", ""
     _read_docx_text_and_rows = CTX["_read_docx_text_and_rows"]
     _read_docx_text_and_rows_from_path = CTX["_read_docx_text_and_rows_from_path"]
     _extract_requirements_from_table_rows = CTX["_extract_requirements_from_table_rows"]
@@ -83,6 +178,8 @@ def render(st, db, rule_engine, CTX):
 
     # Install the shim globally
     CTX["get_ai_suggestion"] = _safe_get_ai_suggestion
+        # Rebind local convenience name so later helpers use the shim
+    get_ai_suggestion = CTX["get_ai_suggestion"]
 
     # ---- AI contradiction config & caller ----
     CTX.update({
@@ -114,17 +211,7 @@ def render(st, db, rule_engine, CTX):
     if not CTX.get("api_key"):
         st.info("AI key missing — paste your Google AI Studio API key in the sidebar to enable AI features.")
 
-    # --- Getting started (indented) -------------------------------------------
-    with st.expander("Getting started (2–3 minutes)", expanded=False):
-        st.markdown(
-            "<div style='margin-left:16px'>"
-            "• Paste 3–10 requirements or upload a document.<br/>"
-            "• Click Analyze to see clarity issues (ambiguity, passive voice, etc.).<br/>"
-            "• Use AI actions to rewrite or decompose, then run Contradiction Scan."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
+  
     # --- UI mode & onboarding (Beginner UI removed) ---------------------------
     beginner = False
     # Quick utility to reset noisy inline AI results
@@ -282,6 +369,14 @@ def render(st, db, rule_engine, CTX):
         project_name = st.session_state.selected_project[1]
         st.header(f"Analyze & Add Documents to: {project_name}")
 
+        sel_proj = st.session_state.get("selected_project")
+        pname = sel_proj[1] if sel_proj else None
+        if not sel_proj:
+            st.header("Analyze Documents & Text")
+            st.warning("You can analyze documents without a project, but results won’t be saved.")
+        else:
+            project_name = sel_proj[1]
+            st.header(f"Analyze & Add Documents to: {project_name}")
     # ===== Quick Paste Analyzer ------------------------------------------------
     st.subheader("🔍 Quick Paste Analyzer — single or small set")
     quick_text = st.text_area(
@@ -300,6 +395,8 @@ def render(st, db, rule_engine, CTX):
         st.session_state.quick_analyzed = False
     if "quick_text_snapshot" not in st.session_state:
         st.session_state.quick_text_snapshot = ""
+    if "quick_buckets" not in st.session_state:
+        st.session_state.quick_buckets = {"statement_missing_modal": [], "non_requirement": [], "gibberish": []}
 
     def _parse_quick_lines(raw: str):
         rows = []
@@ -900,6 +997,7 @@ Parent requirement:
         return out
 
     # ---- Analyze (Quick Paste) -----------------------------------------------
+
     if st.button("Analyze Pasted Lines", key="quick_analyze_btn"):
         pairs = _parse_quick_lines(quick_text)
         if not pairs:
@@ -908,19 +1006,37 @@ Parent requirement:
             st.session_state.quick_issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
             st.session_state.quick_analyzed = False
             st.session_state.quick_text_snapshot = ""
+            st.session_state.quick_buckets = {"statement_missing_modal": [], "non_requirement": [], "gibberish": []}
         else:
             issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
             quick_results = []
+            # reset buckets per run
+            st.session_state.quick_buckets = {"statement_missing_modal": [], "non_requirement": [], "gibberish": []}
             for rid, rtx in pairs:
+                cat, reason = _classify_requirement_line(rtx)
+                if cat != "requirement":
+                    st.session_state.quick_buckets[cat].append({"id": rid, "text": rtx, "reason": reason})
+                    continue
+
                 amb_raw = safe_call_ambiguity(rtx, rule_engine)
                 amb = _post_filter_ambiguity(rtx, amb_raw)
-
                 pas = check_passive_voice(rtx)
                 inc = check_incompleteness(rtx)
+                sing = []
                 try:
-                    sing = check_singularity(rtx)
+                    sing = check_singularity(rtx) or []
                 except Exception:
-                    sing = []
+                    pass
+                # --- Fallback heuristics (catch things your rule engine may miss) ---
+                # 1) Multiple binding modals → definitely multiple actions
+                if len(re.findall(r"\b(shall|must)\b", rtx, flags=re.I)) >= 2:
+                    sing.append("Multiple binding modals (e.g., 'shall … and shall …'). Split into separate requirements.")
+                # 2) Single modal but two coordinated predicates after it (common 'shall X … and Y …' case)
+                #    e.g., "shall provide … and support …"  (without repeating 'shall')
+                elif re.search(r"\b(shall|must)\b[^.]*\b(and|&)\b[^.]*\b(provide|support|ensure|maintain|encrypt|log|record|alert|compute|store|verify|transmit)\b",
+                               rtx, flags=re.I):
+                    sing.append("Multiple coordinated actions after a single modal. Consider decomposition.")
+
                 if amb:
                     issue_counts["Ambiguity"] += 1
                 if pas:
@@ -929,14 +1045,20 @@ Parent requirement:
                     issue_counts["Incompleteness"] += 1
                 if sing:
                     issue_counts["Singularity"] += 1
+
                 quick_results.append({
-                    "id": rid, "text": rtx,
-                    "ambiguous": amb, "passive": pas, "incomplete": inc, "singularity": sing
+                    "id": rid,
+                    "text": rtx,
+                    "ambiguous": amb,
+                    "passive": pas,
+                    "incomplete": inc,
+                    "singularity": sing
                 })
             st.session_state.quick_results = quick_results
             st.session_state.quick_issue_counts = issue_counts
             st.session_state.quick_analyzed = True
             st.session_state.quick_text_snapshot = quick_text
+
     # Remove the AI smoke test button
     # if st.button("AI Smoke Test: get_ai_suggestion", key="ai_smoke"):
     #     try:
@@ -1003,6 +1125,44 @@ Parent requirement:
         flagged_list = [r for r in quick_results if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]]
         clear_list = [r for r in quick_results if not (r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])]
 
+        # Render classifier buckets after flagged/clear
+        buckets = st.session_state.get("quick_buckets", {})
+        miss = buckets.get("statement_missing_modal", [])
+        nonreq = buckets.get("non_requirement", [])
+        gib = buckets.get("gibberish", [])
+
+        g_total = len(miss) + len(nonreq) + len(gib)
+        st.markdown(f"**Other (not analyzed):** {g_total}")
+
+        if miss:
+            st.subheader(f"🚫 Not a proper requirement — missing modal ({len(miss)})")
+            st.caption("These look like sentences but are missing a binding modal. Suggest: change to “shall”.")
+            for r in miss:
+                st.markdown(
+                    f'<div style="background:#FFF3CD;color:#856404;padding:10px;border-radius:5px;margin-bottom:10px;">'
+                    f'⚠️ <strong>{r["id"]}</strong> {r["text"]}<br/><em>{r["reason"]}</em>'
+                    f'<br/><code>Suggestion: The system shall {r["text"].lstrip().rstrip(".")}</code></div>',
+                    unsafe_allow_html=True
+                )
+
+        if nonreq:
+            st.subheader(f"🚫 Not requirements (skipped) — headings/code ({len(nonreq)})")
+            for r in nonreq:
+                st.markdown(
+                    f'<div style="background:#E2E3E5;color:#383D41;padding:10px;border-radius:5px;margin-bottom:10px;">'
+                    f'🛈 <strong>{r["id"]}</strong> {r["text"]}<br/><em>{r["reason"]}</em></div>',
+                    unsafe_allow_html=True
+                )
+
+        if gib:
+            st.subheader(f"🚫 Gibberish / non-language ({len(gib)})")
+            for r in gib:
+                st.markdown(
+                    f'<div style="background:#F8D7DA;color:#721C24;padding:10px;border-radius:5px;margin-bottom:10px;">'
+                    f'🚫 <strong>{r["id"]}</strong> {r["text"]}<br/><em>{r["reason"]}</em></div>',
+                    unsafe_allow_html=True
+                )
+
         with st.expander(f"Flagged ({len(flagged_list)})", expanded=True):
             if not flagged_list:
                 st.caption("None 🎉")
@@ -1016,34 +1176,21 @@ Parent requirement:
                     if badges_html:
                         st.markdown(badges_html, unsafe_allow_html=True)
 
-                    # AI actions with strict gating
+                    # AI actions (adaptive)
                     has_amb = bool(r.get("ambiguous"))
                     has_pas = bool(r.get("passive"))
                     has_inc = bool(r.get("incomplete"))
                     has_sing = bool(r.get("singularity"))
-                    only_sing = has_sing and not (has_amb or has_pas or has_inc)
+
+                    num_issues = int(has_amb) + int(has_pas) + int(has_inc) + int(has_sing)
 
                     if st.session_state.api_key:
-                        if only_sing:
-                            cols = st.columns(1)
-                            with cols[0]:
-                                if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_only_{r['id']}"):
-                                    try:
-                                        base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
-                                        d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
-                                        if d.strip():
-                                            key = f"decomp_cache_{r['id']}"
-                                            existing = st.session_state.get(key, "").strip()
-                                            st.session_state[key] = ((existing + "\n" + d.strip()).strip()
-                                                                     if existing and d.strip() not in existing else (d.strip() or existing))
-                                        st.info("Decomposition:")
-                                        st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
-                                    except Exception as e:
-                                        st.warning(f"AI decomposition failed: {e}")
-                        elif has_sing:
+                        # CASE A: multiple issues including singularity -> show all three
+                        if num_issues >= 2 and has_sing:
                             cols = st.columns(3)
+
                             with cols[0]:
-                                if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_{r['id']}"):
+                                if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"qp_fix_{r['id']}"):
                                     try:
                                         suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                         st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
@@ -1051,8 +1198,9 @@ Parent requirement:
                                         st.markdown(f"> {suggestion}")
                                     except Exception as e:
                                         st.warning(f"AI rewrite failed: {e}")
+
                             with cols[1]:
-                                if st.button(f"🧩 Decompose [{r['id']}]", key=f"quick_dec_{r['id']}"):
+                                if st.button(f"🧩 Decompose [{r['id']}]", key=f"qp_dec_{r['id']}"):
                                     try:
                                         base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
                                         d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
@@ -1065,10 +1213,11 @@ Parent requirement:
                                         st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
                                     except Exception as e:
                                         st.warning(f"AI decomposition failed: {e}")
+
                             with cols[2]:
-                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"quick_pipe_{r['id']}"):
+                                if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"qp_pipe_{r['id']}"):
                                     try:
-                                        cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                        cleaned = st.session_state.get(f"rewritten_cache_{r['id']}","").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                         st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
                                         d = _ai_decompose_children(st.session_state.api_key, r["id"], cleaned)
                                         if d.strip():
@@ -1083,10 +1232,36 @@ Parent requirement:
                                             st.markdown(st.session_state[f"decomp_cache_{r['id']}"])
                                     except Exception as e:
                                         st.warning(f"AI pipeline failed: {e}")
-                    else:
-                        cols = st.columns(1)
-                        with cols[0]:
-                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"quick_fix_only_{r['id']}"):
+
+                        # CASE B: exactly one issue
+                        elif num_issues == 1:
+                            if has_sing:
+                                if st.button(f"🧩 Decompose [{r['id']}]", key=f"qp_dec_only_{r['id']}"):
+                                    try:
+                                        base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
+                                        d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
+                                        if d.strip():
+                                            key = f"decomp_cache_{r['id']}"
+                                            existing = st.session_state.get(key, "").strip()
+                                            st.session_state[key] = ((existing + "\n" + d.strip()).strip()
+                                                                     if existing and d.strip() not in existing else (d.strip() or existing))
+                                        st.info("Decomposition:")
+                                        st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
+                                    except Exception as e:
+                                        st.warning(f"AI decomposition failed: {e}")
+                            else:
+                                if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"qp_fix_only_{r['id']}"):
+                                    try:
+                                        suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
+                                        st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
+                                        st.info("Rewritten:")
+                                        st.markdown(f"> {suggestion}")
+                                    except Exception as e:
+                                        st.warning(f"AI rewrite failed: {e}")
+
+                        # CASE C: multiple issues but none is singularity
+                        elif num_issues >= 2 and not has_sing:
+                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"qp_fix_multi_{r['id']}"):
                                 try:
                                     suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
@@ -1094,17 +1269,14 @@ Parent requirement:
                                     st.markdown(f"> {suggestion}")
                                 except Exception as e:
                                     st.warning(f"AI rewrite failed: {e}")
+            else:
+                st.caption("ℹ️ Enter your Google AI API key to enable Fix/Decompose actions.")
 
-                # Show cached results inline (inside flagged container)
-                cached_rw = st.session_state.get(f"rewritten_cache_{r['id']}", "")
-                cached_dc = st.session_state.get(f"decomp_cache_{r['id']}", "")
-                if cached_rw:
-                    st.caption("AI Rewrite (cached):")
-                    st.code(cached_rw)
-                if cached_dc:
-                    st.caption("AI Decomposition (cached):")
-                    st.markdown(cached_dc)
-        with st.expander(f"Clear ({len(clear_list)})", expanded=False):
+
+       
+
+        # Insert Quick-Paste Clear expander after the flagged/detailed analysis block
+        with st.expander(f"Clear ({len(clear_list)})", expanded=True):
             for r in clear_list:
                 st.markdown(
                     f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
@@ -1112,7 +1284,7 @@ Parent requirement:
                     unsafe_allow_html=True,
                 )
 
-    # --------------- NEW (Quick Paste): Contradiction detection ---------------
+        # --------------- NEW (Quick Paste): Contradiction detection ---------------
     st.subheader("AI Contradiction Scan (Quick Paste)")
     ai_temp_qp = 0.1
     if not beginner:
@@ -1190,6 +1362,7 @@ Parent requirement:
         st.info("AI Parser not available (missing function or API key). Falling back to Standard Parser.")
 
     project_id = st.session_state.selected_project[0] if st.session_state.selected_project else None
+    project_id = (st.session_state.get("selected_project") or [None])[0]
 
     stored_to_analyze = None
     if project_id is not None and hasattr(db, "get_documents_for_project"):
@@ -1403,6 +1576,7 @@ Parent requirement:
                     continue
 
                 # --- Analyze requirements --------------------------------------------
+
                 results = []
                 issue_counts = {"Ambiguity": 0, "Passive Voice": 0, "Incompleteness": 0, "Singularity": 0}
 
@@ -1427,6 +1601,18 @@ Parent requirement:
                         singular = check_singularity(rtext)
                     except Exception:
                         singular = []
+
+                    # --- Fallback heuristics (catch things your rule engine may miss) ---
+                    # 1) Multiple binding modals → definitely multiple actions
+                    if len(re.findall(r"\b(shall|must)\b", rtext, flags=re.I)) >= 2:
+                        singular = singular or []
+                        singular.append("Multiple binding modals (e.g., 'shall … and shall …'). Split into separate requirements.")
+                    # 2) Single modal but two coordinated predicates after it (common 'shall X … and Y …' case)
+                    #    e.g., "shall provide … and support …"  (without repeating 'shall')
+                    elif re.search(r"\b(shall|must)\b[^.]*\b(and|&)\b[^.]*\b(provide|support|ensure|maintain|encrypt|log|record|alert|compute|store|verify|transmit)\b",
+                                   rtext, flags=re.I):
+                        singular = singular or []
+                        singular.append("Multiple coordinated actions after a single modal. Consider decomposition.")
 
                     if ambiguous:
                         issue_counts["Ambiguity"] += 1
@@ -1488,7 +1674,6 @@ Parent requirement:
                                             pass
                                 except Exception as _e:
                                     st.warning(f"Saved analysis, but file persistence failed for '{display_name}': {_e}")
-
                         elif hasattr(db, "add_document_to_project") and hasattr(db, "add_requirements_to_document"):
                             doc_id = db.add_document_to_project(project_id, display_name, clarity_score)
                             db.add_requirements_to_document(doc_id, reqs)
@@ -1521,6 +1706,8 @@ Parent requirement:
                     c3.metric("Clarity Score", f"{clarity_score} / 100")
                     st.progress(clarity_score)
 
+                    
+
                     # Bulk actions for this document
                     if st.session_state.api_key:
                         cols_bulk_doc = st.columns([1.3, 1.9])
@@ -1547,7 +1734,7 @@ Parent requirement:
                                         if r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"]
                                     ]
                                     rew_count, dec_count = _ai_batch_rewrite_and_decompose(st.session_state.api_key, flagged_for_action)
-                                st.success(f"Rewrote {rewrote} and decomposed {dec_count} requirement(s).")
+                                st.success(f"Rewrote {rew_count} and decomposed {dec_count} requirement(s).")
                     else:
                         st.caption("ℹ️ Enter your Google AI API key to enable bulk AI rewrites/decomposition.")
  
@@ -1661,7 +1848,8 @@ Parent requirement:
                                     st.caption("Tip: Enable debug above to inspect prompts and raw model output.")
 
                     st.subheader("Issues by Type")
-                    st.bar_chart(issue_counts)
+                    
+                    st.bar_chart(pd.Series(issue_counts, name="Count"))
                         # --- Download analyzed results (This Document) ---
                     import io
                     if analyzed_only:
@@ -1713,65 +1901,64 @@ Parent requirement:
                                 if r["singularity"]:
                                     st.caption(f"ⓘ **Singularity:** {', '.join(r['singularity'])}")
 
-                                # === AI actions (Document view) — mirror Quick-Paste ===
+                                # === AI actions (Document view) — tri-option logic ===
                                 has_amb = bool(r.get("ambiguous"))
                                 has_pas = bool(r.get("passive"))
                                 has_inc = bool(r.get("incomplete"))
                                 has_sing = bool(r.get("singularity"))
-                                only_sing = has_sing and not (has_amb or has_pas or has_inc)
+
+                                # how many categories actually tripped
+                                num_issues = int(has_amb) + int(has_pas) + int(has_inc) + int(has_sing)
+
+                                # namespacing for Streamlit keys so buttons don't collide across rows
+                                ns = f"doc_{doc_idx}_{r_idx}"
+
                                 if st.session_state.api_key:
-                                    if only_sing:
-                                        cols = st.columns(1)
-                                        with cols[0]:
-                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"doc_dec_only_{doc_idx}_{r_idx}_{r['id']}"):
-                                                try:
-                                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
-                                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
-                                                    if d.strip():
-                                                        key = f"decomp_cache_{r['id']}"
-                                                        existing = st.session_state.get(key, "").strip()
-                                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
-                                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
-                                                    st.info("Decomposition:")
-                                                    st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
-                                                except Exception as e:
-                                                    st.warning(f"AI decomposition failed: {e}")
-                                    elif has_sing:
+                                    # CASE A: multiple issues and singularity present -> show all three buttons
+                                    if num_issues >= 2 and has_sing:
                                         cols = st.columns(3)
+
+                                        # Fix Clarity
                                         with cols[0]:
-                                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"doc_fix_{doc_idx}_{r_idx}_{r['id']}"):
+                                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"fix_{r['id']}_{ns}"):
                                                 try:
-                                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
+                                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
                                                     st.info("Rewritten:")
                                                     st.markdown(f"> {suggestion}")
                                                 except Exception as e:
                                                     st.warning(f"AI rewrite failed: {e}")
+
+                                        # Decompose
                                         with cols[1]:
-                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"doc_dec_{doc_idx}_{r_idx}_{r['id']}"):
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"dec_{r['id']}_{ns}"):
                                                 try:
-                                                    base = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or r["text"]
+                                                    base = (st.session_state.get(f"rewritten_cache_{r['id']}", "").strip()
+                                                            or r["text"])
                                                     d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
                                                     if d.strip():
-                                                        key = f"decomp_cache_{r['id']}"
-                                                        existing = st.session_state.get(key, "").strip()
-                                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
-                                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
+                                                        k = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(k, "").strip()
+                                                        st.session_state[k] = ((existing + "\n" + d.strip()).strip()
+                                                                               if existing and d.strip() not in existing else (d.strip() or existing))
                                                     st.info("Decomposition:")
                                                     st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
                                                 except Exception as e:
                                                     st.warning(f"AI decomposition failed: {e}")
+
+                                        # Auto pipeline: Fix -> Decompose
                                         with cols[2]:
-                                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"doc_pipe_{doc_idx}_{r_idx}_{r['id']}"):
+                                            if st.button(f"Auto: Fix → Decompose [{r['id']}]", key=f"pipe_{r['id']}_{ns}"):
                                                 try:
-                                                    cleaned = st.session_state.get(f"rewritten_cache_{r['id']}", "").strip() or _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                    cleaned = (st.session_state.get(f"rewritten_cache_{r['id']}", "").strip()
+                                                               or _ai_rewrite_clarity(st.session_state.api_key, r["text"]))
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = cleaned
                                                     d = _ai_decompose_children(st.session_state.api_key, r["id"], cleaned)
                                                     if d.strip():
-                                                        key = f"decomp_cache_{r['id']}"
-                                                        existing = st.session_state.get(key, "").strip()
-                                                        st.session_state[key] = ((existing + "\n" + d.strip()).strip()
-                                                                                 if existing and d.strip() not in existing else (d.strip() or existing))
+                                                        k = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(k, "").strip()
+                                                        st.session_state[k] = ((existing + "\n" + d.strip()).strip()
+                                                                               if existing and d.strip() not in existing else (d.strip() or existing))
                                                     st.success("Rewritten requirement:")
                                                     st.markdown(f"> {cleaned}")
                                                     if st.session_state.get(f"decomp_cache_{r['id']}", ""):
@@ -1779,46 +1966,67 @@ Parent requirement:
                                                         st.markdown(st.session_state[f"decomp_cache_{r['id']}"])
                                                 except Exception as e:
                                                     st.warning(f"AI pipeline failed: {e}")
-                                    else:
-                                        cols = st.columns(1)
-                                        with cols[0]:
-                                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"doc_fix_only_{doc_idx}_{r_idx}_{r['id']}"):
+
+                                    # CASE B: exactly one issue
+                                    elif num_issues == 1:
+                                        # only singularity -> show Decompose
+                                        if has_sing:
+                                            if st.button(f"🧩 Decompose [{r['id']}]", key=f"dec_only_{r['id']}_{ns}"):
                                                 try:
-                                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r['text'])
+                                                    base = (st.session_state.get(f"rewritten_cache_{r['id']}", "").strip()
+                                                            or r["text"])
+                                                    d = _ai_decompose_children(st.session_state.api_key, r["id"], base)
+                                                    if d.strip():
+                                                        k = f"decomp_cache_{r['id']}"
+                                                        existing = st.session_state.get(k, "").strip()
+                                                        st.session_state[k] = ((existing + "\n" + d.strip()).strip()
+                                                                               if existing and d.strip() not in existing else (d.strip() or existing))
+                                                    st.info("Decomposition:")
+                                                    st.markdown(st.session_state.get(f"decomp_cache_{r['id']}", d))
+                                                except Exception as e:
+                                                    st.warning(f"AI decomposition failed: {e}")
+                                        # only ambiguity/passive/incomplete -> show Fix only
+                                        else:
+                                            if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"fix_only_{r['id']}_{ns}"):
+                                                try:
+                                                    suggestion = _ai_rewrite_clarity(st.session_state.api_key, r["text"])
                                                     st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
                                                     st.info("Rewritten:")
                                                     st.markdown(f"> {suggestion}")
                                                 except Exception as e:
                                                     st.warning(f"AI rewrite failed: {e}")
 
-                                # Show cached results inline (inside flagged container)
-                                cached_rw = st.session_state.get(f"rewritten_cache_{r['id']}", "")
-                                cached_dc = st.session_state.get(f"decomp_cache_{r['id']}", "")
-                                if cached_rw:
-                                    st.caption("AI Rewrite (cached):")
-                                    st.code(cached_rw)
-                                if cached_dc:
-                                    st.caption("AI Decomposition (cached):")
-                                    st.markdown(cached_dc)
-                        else:
+                                    # CASE C: multiple issues but none is singularity -> Fix only
+                                    elif num_issues >= 2 and not has_sing:
+                                        if st.button(f"⚒️ Fix Clarity [{r['id']}]", key=f"fix_multi_{r['id']}_{ns}"):
+                                            try:
+                                                suggestion = _ai_rewrite_clarity(st.session_state.api_key, r["text"])
+                                                st.session_state[f"rewritten_cache_{r['id']}"] = (suggestion or "").strip()
+                                                st.info("Rewritten:")
+                                                st.markdown(f"> {suggestion}")
+                                            except Exception as e:
+                                                st.warning(f"AI rewrite failed: {e}")
+                                else:
+                                    st.caption("ℹ️ Enter your Google AI API key to enable Fix/Decompose actions.")
+
+
+        
+
+        # Insert per-document Clear expander after Detailed Analysis for this document
+                    clear_list_doc = [
+                        r for r in analyzed_only
+                        if not (r["ambiguous"] or r["passive"] or r["incomplete"] or r["singularity"])
+                    ]
+
+                    with st.expander(f"Clear ({len(clear_list_doc)})", expanded=True):
+                        for r in clear_list_doc:
                             st.markdown(
                                 f'<div style="background-color:#D4EDDA;color:#155724;padding:10px;'
                                 f'border-radius:5px;margin-bottom:10px;">✅ <strong>{r["id"]}</strong> {r["text"]}</div>',
                                 unsafe_allow_html=True,
                             )
-                    # NEW: Not requirements (skipped)
-                    nonreq_list_doc = [r for r in results if r.get("non_requirement")]
-                    if nonreq_list_doc:
-                        st.subheader("🚫 Not requirements (skipped)")
-                        for r in nonreq_list_doc:
-                            st.markdown(
-                                f'<div style="background:#F8D7DA;color:#721C24;padding:10px;border-radius:5px;'
-                                f'margin-bottom:10px;">'
-                                f'🚫 <strong>{r["id"]}</strong> {r["text"]} — <em>not a proper requirement</em></div>',
-                                unsafe_allow_html=True,
-                            )
 
-    # -------------------- Cross-document contradiction scan ---------------------
+        # -------------------- Cross-document contradiction scan ---------------------
     if all_doc_req_rows:
         st.subheader("AI Contradiction Scan — Across All Analyzed Documents")
         if st.button("🔎 Run Cross-Document Scan", key="ai_contra_all_docs"):
@@ -1892,8 +2100,7 @@ Parent requirement:
                     if os.path.exists(conv_path):
                         rel_path = f"data/projects/{project_id}/documents/{doc_id}_{CTX['_sanitize_filename'](file_name)}"
                         st.markdown(
-                            f"- [{file_name} (v{version})]({st.file_uploader.get_file_url(rel_path)}) — Clarity: {clarity_score}/100",
-                            unsafe_allow_html=True
+                            f"- **{file_name} (v{version})** — Clarity: {clarity_score}/100"
                         )
                     else:
                         st.warning(f"Document file not found: {conv_path}")
